@@ -290,6 +290,9 @@ Common `irodori` options:
 | `chunking_enabled` | Enable or disable automatic long text chunking for this request. |
 | `chunk_min_chars` | Minimum non-space characters before a chunk split point is used. |
 | `first_sentence_chunk_min_chars` | Optional minimum non-space characters used only for splitting the first sentence. |
+| `caption` | Voice/style description for caption-enabled VoiceDesign checkpoints. Ignored by checkpoints without caption conditioning. |
+| `cfg_scale_caption` | Strength of caption guidance. |
+| `max_caption_len` | Optional maximum caption token length. |
 
 Dynamic LoRA loading is per runtime process. The first request for an adapter loads it into memory; later requests for the same adapter reuse the cached adapter. To run the base model after an adapter has been loaded, omit `lora_adapter` or set it to `null`, `"none"`, or `"base"`. Dynamic LoRA is not compatible with `IRODORI_COMPILE_MODEL=true`.
 

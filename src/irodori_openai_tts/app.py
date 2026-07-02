@@ -34,6 +34,7 @@ _synthesis_semaphore_limit: int | None = None
 class IrodoriOptions(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    caption: str | None = None
     ref_wav: str | None = None
     ref_latent: str | None = None
     ref_embed: str | None = None
@@ -51,6 +52,7 @@ class IrodoriOptions(BaseModel):
     num_candidates: int | None = None
     decode_mode: Literal["sequential", "batch"] | None = None
     cfg_scale_text: float | None = None
+    cfg_scale_caption: float | None = None
     cfg_scale_speaker: float | None = None
     cfg_guidance_mode: Literal["independent", "joint", "alternating"] | None = None
     cfg_scale: float | None = None
@@ -69,6 +71,7 @@ class IrodoriOptions(BaseModel):
     tail_std_threshold: float | None = None
     tail_mean_threshold: float | None = None
     max_text_len: int | None = None
+    max_caption_len: int | None = None
     lora_adapter: str | None = None
     chunking_enabled: bool | None = None
     chunk_min_chars: int | None = None
@@ -780,6 +783,10 @@ def _build_sampling_request(payload: SpeechRequest, voice: VoiceSpec) -> Samplin
 
     return SamplingRequest(
         text=payload.input,
+        caption=_as_optional_str(
+            _coalesce(opts.caption, _extra(payload, "caption"), None),
+            "caption",
+        ),
         ref_wav=voice.ref_wav,
         ref_latent=voice.ref_latent,
         ref_embed=voice.ref_embed,
@@ -838,6 +845,10 @@ def _build_sampling_request(payload: SpeechRequest, voice: VoiceSpec) -> Samplin
             _coalesce(opts.max_text_len, _extra(payload, "max_text_len"), None),
             "max_text_len",
         ),
+        max_caption_len=_as_optional_int(
+            _coalesce(opts.max_caption_len, _extra(payload, "max_caption_len"), None),
+            "max_caption_len",
+        ),
         num_steps=_as_int(
             _coalesce(opts.num_steps, _extra(payload, "num_steps"), settings.default_num_steps),
             "num_steps",
@@ -849,6 +860,14 @@ def _build_sampling_request(payload: SpeechRequest, voice: VoiceSpec) -> Samplin
                 settings.default_cfg_scale_text,
             ),
             "cfg_scale_text",
+        ),
+        cfg_scale_caption=_as_float(
+            _coalesce(
+                opts.cfg_scale_caption,
+                _extra(payload, "cfg_scale_caption"),
+                settings.default_cfg_scale_text,
+            ),
+            "cfg_scale_caption",
         ),
         cfg_scale_speaker=_as_float(
             _coalesce(
