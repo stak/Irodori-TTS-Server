@@ -93,6 +93,15 @@
       <div><label>sway_coeff</label><input type="number" id="swayCoeff" value="-1.0" step="0.1"></div>
     </div>
     <div class="row">
+      <div><label>フォーマット</label>
+        <select id="respFormat">
+          <option value="mp3" selected>mp3</option>
+          <option value="wav">wav</option>
+          <option value="flac">flac</option>
+          <option value="opus">opus</option>
+          <option value="aac">aac</option>
+        </select>
+      </div>
       <div><label>seed（空=ランダム）</label><input type="number" id="seed" placeholder=""></div>
       <div><label>speed</label><input type="number" id="speed" value="1.0" step="0.05" min="0.25" max="4"></div>
       <div style="flex:2"><label>LoRA アダプタ（ディレクトリパス、空=ベース）</label>
@@ -210,13 +219,13 @@ function buildPayload(text) {
     model: "irodori-tts",
     input: text,
     voice: $("voice").value,
-    response_format: "wav",
+    response_format: $("respFormat").value,
     speed: parseFloat($("speed").value) || 1.0,
     irodori,
   };
 }
 
-function addHistory(blob, label, sub) {
+function addHistory(blob, label, sub, ext = "wav") {
   const url = URL.createObjectURL(blob);
   const div = document.createElement("div");
   div.className = "gen";
@@ -224,7 +233,7 @@ function addHistory(blob, label, sub) {
   div.innerHTML =
     `<div class="meta"><div class="text">#${id} ${label}</div><div class="sub">${sub}</div></div>` +
     `<audio controls src="${url}"></audio>` +
-    `<a class="dl" href="${url}" download="speech_${id}.wav">保存</a>`;
+    `<a class="dl" href="${url}" download="speech_${id}.${ext}">保存</a>`;
   $("history").prepend(div);
   return div.querySelector("audio");
 }
@@ -258,10 +267,11 @@ async function speak() {
     const sub = `往復 ${elapsed}s` +
       (ttd ? ` | total_to_decode ${(parseFloat(ttd)).toFixed(3)}s` : "") +
       (seed ? ` | seed ${seed}` : "") +
+      ` | fmt=${payload.response_format} (${Math.round(blob.size / 1024)} KB)` +
       ` | voice=${payload.voice} steps=${payload.irodori.num_steps ?? "-"} sched=${payload.irodori.t_schedule_mode}` +
       ` | lora=${payload.irodori.lora_adapter ? "on" : "base"} hot_swap=${payload.irodori.lora_hot_swap}` +
       ` | wm=${payload.irodori.apply_watermark}`;
-    const audio = addHistory(blob, text.slice(0, 40), sub);
+    const audio = addHistory(blob, text.slice(0, 40), sub, payload.response_format);
     audio.play().catch(() => {});
     setStatus(el, `完了 (${elapsed}s)` + (ttd ? ` — サーバー内 total_to_decode: ${parseFloat(ttd).toFixed(3)}s` : ""), "ok");
   } catch (e) {
@@ -324,7 +334,8 @@ async function speakSSE(payload, el, t0) {
             `サーバー内 total_to_decode ${data.total_to_decode.toFixed(3)}s, ${Math.round(bytes.length / 1024)} KB): ` +
             `「${data.text}」`);
           const audio = addHistory(blob, `[SSE ${data.index}] ${data.text.slice(0, 30)}`,
-            `到着 +${arrival.toFixed(2)}s | total_to_decode ${data.total_to_decode.toFixed(3)}s | seed ${data.seed}`);
+            `到着 +${arrival.toFixed(2)}s | total_to_decode ${data.total_to_decode.toFixed(3)}s | seed ${data.seed}`,
+            data.format);
           playQueue.push(audio); playNext();
           setStatus(el, `SSE: ${chunks} チャンク受信 (+${arrival.toFixed(2)}s)`, "busy");
         } else if (event === "error") {
