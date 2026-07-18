@@ -140,6 +140,7 @@ if settings.cors_origins:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Irodori-Seed", "X-Irodori-Total-To-Decode", "X-Irodori-Messages"],
     )
 
 
