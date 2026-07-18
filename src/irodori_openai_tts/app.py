@@ -209,6 +209,8 @@ def health() -> dict[str, Any]:
         },
         "defaults": {
             "response_format": settings.default_response_format,
+            "mp3_bitrate_mode": settings.mp3_bitrate_mode,
+            "mp3_compression_level": settings.mp3_compression_level,
             "chunking_enabled": settings.default_chunking_enabled,
             "chunk_min_chars": settings.default_chunk_min_chars,
             "first_sentence_chunk_min_chars": settings.default_first_sentence_chunk_min_chars,
@@ -410,6 +412,8 @@ async def create_speech(payload: SpeechRequest) -> Response:
         result.audio,
         result.sample_rate,
         response_format,
+        mp3_bitrate_mode=settings.mp3_bitrate_mode,
+        mp3_compression_level=settings.mp3_compression_level,
     )
     logger.info(
         "speech synthesis completed: elapsed=%.2fs audio_seconds=%.2f bytes=%d seed=%s",
@@ -704,6 +708,8 @@ def _stream_speech_response(
                     result.audio,
                     result.sample_rate,
                     response_format,
+                    mp3_bitrate_mode=settings.mp3_bitrate_mode,
+                    mp3_compression_level=settings.mp3_compression_level,
                 )
                 completed += 1
                 logger.info(

@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     allow_no_ref_voice: bool = True
 
     default_response_format: str = "wav"
+    mp3_bitrate_mode: str = "VARIABLE"
+    mp3_compression_level: float = 0.0
     default_num_steps: int = 40
     default_t_schedule_mode: str = "linear"
     default_sway_coeff: float = -1.0

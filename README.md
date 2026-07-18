@@ -489,6 +489,8 @@ All environment variables use the `IRODORI_` prefix. Request fields override the
 | `IRODORI_DEFAULT_VOICE` | unset | Used when request omits `voice`. |
 | `IRODORI_ALLOW_NO_REF_VOICE` | `true` | Allow `voice: "none"` text-only inference. |
 | `IRODORI_DEFAULT_RESPONSE_FORMAT` | `wav` | Default response format. |
+| `IRODORI_MP3_BITRATE_MODE` | `VARIABLE` | MP3 encoder bitrate mode: `VARIABLE` (LAME VBR), `AVERAGE`, or `CONSTANT`. |
+| `IRODORI_MP3_COMPRESSION_LEVEL` | `0.0` | MP3 encoder quality, `0.0` (best) to just under `1.0`. For `VARIABLE` this maps to the LAME `-V` quality (`0.0` = `-V0`, ~160 kbps mono speech); for `CONSTANT` it selects the bitrate (`0.0` = 320 kbps). Applies to the default soundfile encoder; the torchaudio/ffmpeg fallbacks use their own defaults. |
 | `IRODORI_DEFAULT_NUM_STEPS` | `40` | Default diffusion steps. |
 | `IRODORI_DEFAULT_T_SCHEDULE_MODE` | `linear` | Default timestep schedule. |
 | `IRODORI_DEFAULT_SWAY_COEFF` | `-1.0` | Default sway coefficient. Used only when `t_schedule_mode` is `sway`. |

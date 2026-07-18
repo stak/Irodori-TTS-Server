@@ -28,7 +28,17 @@ def normalize_response_format(value: str | None, *, default: str) -> str:
     return fmt
 
 
-def encode_audio(audio: torch.Tensor, sample_rate: int, response_format: str) -> bytes:
+MP3_BITRATE_MODES = {"CONSTANT", "AVERAGE", "VARIABLE"}
+
+
+def encode_audio(
+    audio: torch.Tensor,
+    sample_rate: int,
+    response_format: str,
+    *,
+    mp3_bitrate_mode: str = "VARIABLE",
+    mp3_compression_level: float = 0.0,
+) -> bytes:
     fmt = normalize_response_format(response_format, default="mp3")
     wav = audio.detach().cpu().float()
     if wav.ndim == 1:
@@ -42,8 +52,11 @@ def encode_audio(audio: torch.Tensor, sample_rate: int, response_format: str) ->
         return pcm.tobytes()
 
     if fmt in {"wav", "flac", "mp3", "opus"}:
+        encoder_kwargs = {}
+        if fmt == "mp3":
+            encoder_kwargs = _mp3_encoder_kwargs(mp3_bitrate_mode, mp3_compression_level)
         try:
-            return _encode_with_soundfile(wav, int(sample_rate), fmt)
+            return _encode_with_soundfile(wav, int(sample_rate), fmt, **encoder_kwargs)
         except Exception as exc:
             if fmt in {"wav", "flac"}:
                 raise
@@ -69,6 +82,21 @@ def encode_audio(audio: torch.Tensor, sample_rate: int, response_format: str) ->
             ) from ffmpeg_exc
 
 
+def _mp3_encoder_kwargs(bitrate_mode: str, compression_level: float) -> dict:
+    mode = str(bitrate_mode).strip().upper()
+    if mode not in MP3_BITRATE_MODES:
+        allowed = ", ".join(sorted(MP3_BITRATE_MODES))
+        raise ValueError(f"mp3_bitrate_mode must be one of: {allowed} (got {bitrate_mode!r})")
+    level = float(compression_level)
+    # libsndfile accepts [0.0, 1.0) — 0.0 is the highest quality; for CBR the
+    # level selects the bitrate (0.0 = 320k), for VBR the LAME -V quality.
+    if not 0.0 <= level < 1.0:
+        raise ValueError(
+            f"mp3_compression_level must be within [0.0, 1.0) (got {compression_level!r})"
+        )
+    return {"bitrate_mode": mode, "compression_level": level}
+
+
 def _soundfile_format(fmt: str) -> tuple[str, str | None]:
     if fmt == "mp3":
         return "MP3", "MPEG_LAYER_III"
@@ -77,7 +105,12 @@ def _soundfile_format(fmt: str) -> tuple[str, str | None]:
     return fmt.upper(), None
 
 
-def _encode_with_soundfile(wav: torch.Tensor, sample_rate: int, fmt: str) -> bytes:
+def _encode_with_soundfile(
+    wav: torch.Tensor,
+    sample_rate: int,
+    fmt: str,
+    **encoder_kwargs,
+) -> bytes:
     audio = wav.transpose(0, 1).numpy()
     sf_format, subtype = _soundfile_format(fmt)
     buffer = BytesIO()
@@ -87,6 +120,7 @@ def _encode_with_soundfile(wav: torch.Tensor, sample_rate: int, fmt: str) -> byt
         sample_rate,
         format=sf_format,
         subtype=subtype,
+        **encoder_kwargs,
     )
     return buffer.getvalue()
 

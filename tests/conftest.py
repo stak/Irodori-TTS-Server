@@ -17,6 +17,8 @@ def restore_app_globals(monkeypatch, tmp_path):
     monkeypatch.setattr(main.settings, "default_first_sentence_chunk_min_chars", None)
     monkeypatch.setattr(main.settings, "default_lora_hot_swap", False)
     monkeypatch.setattr(main.settings, "default_apply_watermark", True)
+    monkeypatch.setattr(main.settings, "mp3_bitrate_mode", "VARIABLE")
+    monkeypatch.setattr(main.settings, "mp3_compression_level", 0.0)
     monkeypatch.setattr(main.settings, "preload", False)
     monkeypatch.setattr(main.settings, "prewarm", False)
     monkeypatch.setattr(main.settings, "prewarm_max_seconds", 15.0)

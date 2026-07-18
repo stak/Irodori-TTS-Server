@@ -101,6 +101,81 @@ def test_encode_aac_falls_back_to_ffmpeg(monkeypatch):
     assert payload == b"fake-aac"
 
 
+def test_encode_mp3_compression_level_controls_size():
+    generator = torch.Generator().manual_seed(0)
+    audio = 0.5 * (torch.rand(48000, generator=generator) * 2.0 - 1.0)
+
+    best = encode_audio(
+        audio,
+        sample_rate=48000,
+        response_format="mp3",
+        mp3_bitrate_mode="VARIABLE",
+        mp3_compression_level=0.0,
+    )
+    small = encode_audio(
+        audio,
+        sample_rate=48000,
+        response_format="mp3",
+        mp3_bitrate_mode="VARIABLE",
+        mp3_compression_level=0.75,
+    )
+
+    assert len(best) > len(small)
+
+
+def test_encode_mp3_accepts_lowercase_bitrate_mode():
+    audio = torch.zeros(48000)
+
+    payload = encode_audio(
+        audio,
+        sample_rate=48000,
+        response_format="mp3",
+        mp3_bitrate_mode="constant",
+        mp3_compression_level=0.5,
+    )
+
+    assert payload.startswith(b"ID3") or payload.startswith(b"\xff")
+
+
+def test_encode_mp3_rejects_invalid_bitrate_mode():
+    audio = torch.zeros(48000)
+
+    with pytest.raises(ValueError, match="mp3_bitrate_mode"):
+        encode_audio(
+            audio,
+            sample_rate=48000,
+            response_format="mp3",
+            mp3_bitrate_mode="TURBO",
+        )
+
+
+@pytest.mark.parametrize("level", [-0.1, 1.0, 1.5])
+def test_encode_mp3_rejects_out_of_range_compression_level(level):
+    audio = torch.zeros(48000)
+
+    with pytest.raises(ValueError, match="mp3_compression_level"):
+        encode_audio(
+            audio,
+            sample_rate=48000,
+            response_format="mp3",
+            mp3_compression_level=level,
+        )
+
+
+def test_encode_wav_ignores_mp3_settings():
+    audio = torch.zeros(100)
+
+    payload = encode_audio(
+        audio,
+        sample_rate=1000,
+        response_format="wav",
+        mp3_bitrate_mode="TURBO",
+        mp3_compression_level=5.0,
+    )
+
+    assert payload.startswith(b"RIFF")
+
+
 def test_encode_pcm_clamps_and_returns_int16_bytes():
     audio = torch.tensor([-2.0, 0.0, 2.0])
 

@@ -115,6 +115,8 @@ def test_health_does_not_load_model(tmp_path, monkeypatch):
     assert body["runtime"]["prewarm_status"] is None
     assert body["defaults"]["lora_hot_swap"] is False
     assert body["defaults"]["apply_watermark"] is True
+    assert body["defaults"]["mp3_bitrate_mode"] == "VARIABLE"
+    assert body["defaults"]["mp3_compression_level"] == 0.0
 
 
 def test_startup_prewarms_when_enabled(monkeypatch):
