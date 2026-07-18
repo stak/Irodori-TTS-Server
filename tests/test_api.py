@@ -50,12 +50,21 @@ class FakeRuntimeManager:
         self.is_loaded = runtime is not None
         self.is_loading = exc is not None
         self.thread_ids: list[int] = []
+        self.prewarm_status = None
+        self.prewarm_calls: list[dict] = []
 
     def get(self):
         self.thread_ids.append(threading.get_ident())
         if self.exc is not None:
             raise self.exc
         return self.runtime
+
+    def prewarm(self, **kwargs):
+        if self.exc is not None:
+            raise self.exc
+        self.prewarm_calls.append(kwargs)
+        self.prewarm_status = "prewarmed"
+        return self.prewarm_status
 
 
 class NeverAvailableSemaphore:
@@ -102,6 +111,32 @@ def test_health_does_not_load_model(tmp_path, monkeypatch):
     assert body["voices"]["dir_exists"] is True
     assert body["defaults"]["chunk_min_chars"] == main.settings.default_chunk_min_chars
     assert body["defaults"]["first_sentence_chunk_min_chars"] is None
+    assert body["runtime"]["prewarm"] is False
+    assert body["runtime"]["prewarm_status"] is None
+    assert body["defaults"]["lora_hot_swap"] is False
+    assert body["defaults"]["apply_watermark"] is True
+
+
+def test_startup_prewarms_when_enabled(monkeypatch):
+    manager = FakeRuntimeManager(runtime=FakeRuntime())
+    monkeypatch.setattr(main, "runtime_manager", manager)
+    monkeypatch.setattr(main.settings, "prewarm", True)
+    monkeypatch.setattr(main.settings, "preload", False)
+
+    main.startup()
+
+    assert manager.thread_ids  # runtime was loaded even though preload is off
+    assert manager.prewarm_calls == [{}]
+
+
+def test_startup_does_not_prewarm_by_default(monkeypatch):
+    manager = FakeRuntimeManager(runtime=FakeRuntime())
+    monkeypatch.setattr(main, "runtime_manager", manager)
+
+    main.startup()
+
+    assert manager.thread_ids == []
+    assert manager.prewarm_calls == []
 
 
 def test_models_lists_configured_single_v3_model():
@@ -485,6 +520,152 @@ def test_speech_passes_lora_adapter_option(monkeypatch):
 
     assert response.status_code == 200
     assert runtime.requests[0].lora_adapter == "/models/adapters/speaker-a"
+
+
+def test_speech_defaults_lora_hot_swap_off_and_watermark_on(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.requests[0].lora_hot_swap is False
+    assert runtime.requests[0].apply_watermark is True
+
+
+def test_speech_passes_lora_hot_swap_and_apply_watermark_options(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "irodori": {
+                "lora_adapter": "/models/adapters/speaker-a",
+                "lora_hot_swap": True,
+                "apply_watermark": False,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.requests[0].lora_hot_swap is True
+    assert runtime.requests[0].apply_watermark is False
+
+
+def test_speech_uses_configured_lora_hot_swap_and_watermark_defaults(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+    monkeypatch.setattr(main.settings, "default_lora_hot_swap", True)
+    monkeypatch.setattr(main.settings, "default_apply_watermark", False)
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.requests[0].lora_hot_swap is True
+    assert runtime.requests[0].apply_watermark is False
+
+
+def test_admin_prewarm_passes_options_and_returns_status(monkeypatch):
+    manager = FakeRuntimeManager(runtime=FakeRuntime())
+    monkeypatch.setattr(main, "runtime_manager", manager)
+
+    response = TestClient(main.app).post(
+        "/v1/admin/prewarm",
+        json={
+            "lora_adapter": "/models/adapters/speaker-a",
+            "lora_hot_swap": True,
+            "max_seconds": 10,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"object": "prewarm", "status": "prewarmed"}
+    assert manager.prewarm_calls == [
+        {
+            "lora_adapter": "/models/adapters/speaker-a",
+            "lora_hot_swap": True,
+            "max_seconds": 10.0,
+            "num_steps": None,
+        }
+    ]
+
+
+def test_admin_prewarm_accepts_empty_body(monkeypatch):
+    manager = FakeRuntimeManager(runtime=FakeRuntime())
+    monkeypatch.setattr(main, "runtime_manager", manager)
+
+    response = TestClient(main.app).post("/v1/admin/prewarm")
+
+    assert response.status_code == 200
+    assert manager.prewarm_calls == [
+        {
+            "lora_adapter": None,
+            "lora_hot_swap": None,
+            "max_seconds": None,
+            "num_steps": None,
+        }
+    ]
+
+
+def test_admin_prewarm_returns_503_when_model_is_loading(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "runtime_manager",
+        FakeRuntimeManager(exc=RuntimeLoadTimeoutError("Model is still loading.")),
+    )
+
+    response = TestClient(main.app).post("/v1/admin/prewarm")
+
+    assert response.status_code == 503
+    assert "Model is still loading" in response.json()["error"]["message"]
+
+
+def test_admin_prewarm_returns_400_when_lora_adapter_is_missing(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "runtime_manager",
+        FakeRuntimeManager(exc=FileNotFoundError("LoRA adapter directory not found")),
+    )
+
+    response = TestClient(main.app).post(
+        "/v1/admin/prewarm",
+        json={"lora_adapter": "/missing/adapter"},
+    )
+
+    assert response.status_code == 400
+    assert "LoRA adapter directory not found" in response.json()["error"]["message"]
+
+
+def test_admin_prewarm_requires_auth_when_api_key_is_configured(monkeypatch):
+    monkeypatch.setattr(main.settings, "api_key", "secret")
+    manager = FakeRuntimeManager(runtime=FakeRuntime())
+    monkeypatch.setattr(main, "runtime_manager", manager)
+    client = TestClient(main.app)
+
+    missing = client.post("/v1/admin/prewarm")
+    ok = client.post("/v1/admin/prewarm", headers={"Authorization": "Bearer secret"})
+
+    assert missing.status_code == 401
+    assert ok.status_code == 200
+    assert len(manager.prewarm_calls) == 1
 
 
 def test_speech_runs_model_load_and_synthesis_in_executor(monkeypatch):

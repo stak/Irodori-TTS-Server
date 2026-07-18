@@ -12,7 +12,13 @@ services:
       - "${IRODORI_PORT:-8088}:${IRODORI_PORT:-8088}"
     volumes:
       - hf_cache:/root/.cache/huggingface
+      # torch.compile caches (used with IRODORI_COMPILE=1): persisting them
+      # means only the first container run pays the cold-compile cost.
+      - inductor_cache:/root/.cache/torchinductor
+      - triton_cache:/root/.cache/triton
       - ./voices:/app/voices
 
 volumes:
   hf_cache:
+  inductor_cache:
+  triton_cache:
