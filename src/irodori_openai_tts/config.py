@@ -3,8 +3,15 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Export .env values to os.environ (existing environment variables win).
+# The irodori-tts performance-fork toggles (IRODORI_DISABLE_TF32,
+# IRODORI_TEXT_BUCKETS, IRODORI_COMPILE, ...) are read by the library
+# directly from os.environ, not through these Settings.
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -33,6 +40,9 @@ class Settings(BaseSettings):
     compile_model: bool = False
     compile_dynamic: bool = False
     preload: bool = False
+    prewarm: bool = False
+    prewarm_max_seconds: float = 15.0
+    prewarm_lora_adapter: str | None = None
     model_load_timeout: float = 300.0
     max_concurrent_synthesis: int = 1
     synthesis_wait_timeout: float = 300.0
@@ -67,6 +77,8 @@ class Settings(BaseSettings):
     default_chunking_enabled: bool = True
     default_chunk_min_chars: int = 80
     default_first_sentence_chunk_min_chars: int | None = None
+    default_lora_hot_swap: bool = False
+    default_apply_watermark: bool = True
 
     cors_origins: list[str] = Field(default_factory=list)
 

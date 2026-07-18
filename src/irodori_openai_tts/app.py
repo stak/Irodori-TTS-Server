@@ -73,6 +73,8 @@ class IrodoriOptions(BaseModel):
     max_text_len: int | None = None
     max_caption_len: int | None = None
     lora_adapter: str | None = None
+    lora_hot_swap: bool | None = None
+    apply_watermark: bool | None = None
     chunking_enabled: bool | None = None
     chunk_min_chars: int | None = None
     first_sentence_chunk_min_chars: int | None = None
@@ -90,6 +92,13 @@ class SpeechRequest(BaseModel):
     irodori: IrodoriOptions = Field(default_factory=IrodoriOptions)
 
 
+class PrewarmRequest(BaseModel):
+    lora_adapter: str | None = None
+    lora_hot_swap: bool | None = None
+    max_seconds: float | None = Field(default=None, gt=0.0)
+    num_steps: int | None = Field(default=None, ge=1)
+
+
 settings = get_settings()
 runtime_manager = RuntimeManager(settings)
 voice_registry = VoiceRegistry(settings)
@@ -98,11 +107,18 @@ voice_registry = VoiceRegistry(settings)
 def startup() -> None:
     voices_dir = voice_registry.ensure_dir()
     logger.info("voices directory: %s", voices_dir)
-    if settings.preload:
+    if settings.preload or settings.prewarm:
         logger.info("preload enabled; loading runtime during startup")
         runtime_manager.get()
     else:
         logger.info("preload disabled; runtime will load on first speech request")
+    if settings.prewarm:
+        logger.info(
+            "prewarm enabled; capturing CUDA graphs during startup (max_seconds=%.1f)",
+            settings.prewarm_max_seconds,
+        )
+        status = runtime_manager.prewarm()
+        logger.info("prewarm finished: %s", status)
 
 
 @asynccontextmanager
@@ -174,6 +190,10 @@ def health() -> dict[str, Any]:
         },
         "runtime": {
             "preload": settings.preload,
+            "prewarm": settings.prewarm,
+            "prewarm_max_seconds": settings.prewarm_max_seconds,
+            "prewarm_lora_adapter": settings.prewarm_lora_adapter,
+            "prewarm_status": runtime_manager.prewarm_status,
             "loaded": runtime_manager.is_loaded,
             "loading": runtime_manager.is_loading,
             "checkpoint": runtime_manager.checkpoint_path,
@@ -191,6 +211,8 @@ def health() -> dict[str, Any]:
             "chunking_enabled": settings.default_chunking_enabled,
             "chunk_min_chars": settings.default_chunk_min_chars,
             "first_sentence_chunk_min_chars": settings.default_first_sentence_chunk_min_chars,
+            "lora_hot_swap": settings.default_lora_hot_swap,
+            "apply_watermark": settings.default_apply_watermark,
         },
     }
 
@@ -208,6 +230,31 @@ def list_models() -> dict[str, Any]:
             }
         ],
     }
+
+
+@app.post("/v1/admin/prewarm", dependencies=[Depends(require_auth)])
+async def prewarm(payload: PrewarmRequest | None = None) -> dict[str, Any]:
+    """
+    Load the runtime (if needed) and capture CUDA graphs so following
+    requests take the fast replay path. Optionally targets a LoRA adapter.
+    """
+    body = payload or PrewarmRequest()
+    synthesis_semaphore = await _acquire_synthesis_slot()
+    try:
+        status = await _run_blocking(
+            runtime_manager.prewarm,
+            lora_adapter=body.lora_adapter,
+            lora_hot_swap=body.lora_hot_swap,
+            max_seconds=body.max_seconds,
+            num_steps=body.num_steps,
+        )
+    except RuntimeLoadTimeoutError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        _release_synthesis_slot(synthesis_semaphore)
+    return {"object": "prewarm", "status": status}
 
 
 @app.get("/v1/audio/voices", dependencies=[Depends(require_auth)])
@@ -973,6 +1020,20 @@ def _build_sampling_request(payload: SpeechRequest, voice: VoiceSpec) -> Samplin
         lora_adapter=_as_optional_str(
             _coalesce(opts.lora_adapter, _extra(payload, "lora_adapter"), None),
             "lora_adapter",
+        ),
+        lora_hot_swap=bool(
+            _coalesce(
+                opts.lora_hot_swap,
+                _extra(payload, "lora_hot_swap"),
+                settings.default_lora_hot_swap,
+            )
+        ),
+        apply_watermark=bool(
+            _coalesce(
+                opts.apply_watermark,
+                _extra(payload, "apply_watermark"),
+                settings.default_apply_watermark,
+            )
         ),
     )
 

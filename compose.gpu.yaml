@@ -1,8 +1,33 @@
 services:
   api:
     gpus: all
+    # Values here override .env inside the container, so each entry
+    # interpolates the host-side .env value and only falls back to the
+    # GPU-recommended default when unset.
     environment:
-      IRODORI_MODEL_DEVICE: cuda
-      IRODORI_CODEC_DEVICE: cuda
-      IRODORI_MODEL_PRECISION: bf16
-      IRODORI_CODEC_PRECISION: bf16
+      IRODORI_MODEL_DEVICE: ${IRODORI_MODEL_DEVICE:-cuda}
+      IRODORI_CODEC_DEVICE: ${IRODORI_CODEC_DEVICE:-cuda}
+      # bf16 model + fp32 codec is the performance fork's recommended pairing:
+      # the codec decoder already runs its fp16 fast path under fp32 codec
+      # precision, and bf16/fp16 codec precision only lowers quality.
+      IRODORI_MODEL_PRECISION: ${IRODORI_MODEL_PRECISION:-bf16}
+      IRODORI_CODEC_PRECISION: ${IRODORI_CODEC_PRECISION:-fp32}
+      # Load the model and capture CUDA graphs at startup so the first
+      # request is already fast.
+      IRODORI_PRELOAD: ${IRODORI_PRELOAD:-true}
+      IRODORI_PREWARM: ${IRODORI_PREWARM:-true}
+      IRODORI_PREWARM_MAX_SECONDS: ${IRODORI_PREWARM_MAX_SECONDS:-15}
+      IRODORI_PREWARM_LORA_ADAPTER: ${IRODORI_PREWARM_LORA_ADAPTER:-}
+      # Irodori-TTS performance fork toggles (defaults shown; see
+      # https://github.com/stak/Irodori-TTS/blob/main/docs/performance.md).
+      IRODORI_DISABLE_TF32: ${IRODORI_DISABLE_TF32:-0}
+      IRODORI_DISABLE_LORA_MERGE: ${IRODORI_DISABLE_LORA_MERGE:-0}
+      IRODORI_DISABLE_CUDA_GRAPH: ${IRODORI_DISABLE_CUDA_GRAPH:-0}
+      IRODORI_DISABLE_DURATION_GRAPH: ${IRODORI_DISABLE_DURATION_GRAPH:-0}
+      IRODORI_DISABLE_FP16_DECODE: ${IRODORI_DISABLE_FP16_DECODE:-0}
+      IRODORI_TEXT_BUCKETS: ${IRODORI_TEXT_BUCKETS:-64}
+      # 1 enables torch.compile inside the CUDA step graphs (Linux containers
+      # have the required Triton toolchain; a cold prewarm takes minutes).
+      IRODORI_COMPILE: ${IRODORI_COMPILE:-0}
+      IRODORI_CUDA_GRAPH_BUCKET: ${IRODORI_CUDA_GRAPH_BUCKET:-16}
+      IRODORI_CUDA_GRAPH_CACHE: ${IRODORI_CUDA_GRAPH_CACHE:-64}
