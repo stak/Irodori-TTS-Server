@@ -7,7 +7,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
     UV_LINK_MODE=copy \
-    UV_PROJECT_ENVIRONMENT=/app/.venv
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    # Pin the torch.compile caches to stable paths so compose can mount
+    # volumes there; with IRODORI_COMPILE=1 only the first container run
+    # then pays the cold-compile cost.
+    TORCHINDUCTOR_CACHE_DIR=/root/.cache/torchinductor \
+    TRITON_CACHE_DIR=/root/.cache/triton
 
 WORKDIR /app
 

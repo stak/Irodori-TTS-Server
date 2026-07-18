@@ -179,6 +179,18 @@ with client.audio.speech.with_streaming_response.create(
 
 The SDK method name contains `streaming_response`, but this server still generates a complete response internally.
 
+## Test Client
+
+[examples/test-client.html](examples/test-client.html) is a self-contained browser page for exercising the API by hand: health check, voice list, synthesis with the common `irodori` options (num_steps, schedule, seed, LoRA adapter, hot-swap, watermark), `POST /v1/admin/prewarm`, and SSE streaming with a per-chunk arrival log. Generated audio plays inline and can be downloaded.
+
+Open the file directly in a browser. Because it calls the API from a `file://` origin, allow it in the server configuration:
+
+```env
+IRODORI_CORS_ORIGINS=["*"]
+```
+
+Then point the "サーバー URL" field at your server (default `http://127.0.0.1:8088`) and press ヘルスチェック.
+
 ## API
 
 ### `GET /health`
@@ -438,7 +450,7 @@ Recommended server setup on an NVIDIA GPU:
 1. Set `IRODORI_MODEL_PRECISION=bf16` and keep `IRODORI_CODEC_PRECISION=fp32` (the codec decoder already runs its fp16 fast path; bf16/fp16 codec precision only lowers quality). `compose.gpu.yaml` applies this pairing by default.
 2. Set `IRODORI_PREWARM=true` so the server captures CUDA graphs during startup (this implies loading the model at startup). The first real request then takes the fast path instead of paying capture cost. A 15 s prewarm takes roughly 1 minute once and holds about 1-1.5 GiB of extra VRAM.
 3. If requests use a LoRA adapter, set `IRODORI_PREWARM_LORA_ADAPTER` (or call `POST /v1/admin/prewarm` with `lora_adapter`) so the graphs are captured with that adapter loaded, and consider `IRODORI_DEFAULT_LORA_HOT_SWAP=true` so adapter switches keep the cached graphs.
-4. On Linux/WSL2 (including the Docker image), `IRODORI_COMPILE=1` additionally runs the model through `torch.compile` inside the CUDA graphs for a further speedup. The first prewarm then takes a few minutes (later restarts are faster via the inductor on-disk cache). Leave it off on Windows-native.
+4. On Linux/WSL2 (including the Docker image), `IRODORI_COMPILE=1` additionally runs the model through `torch.compile` inside the CUDA graphs for a further speedup. The first prewarm then takes a few minutes; later restarts are faster via the on-disk compile caches. In Docker those caches are persisted in the `inductor_cache` / `triton_cache` volumes, so only the first container run pays the cold-compile cost. Leave it off on Windows-native.
 
 Prewarmed graphs are keyed by tensor shapes and CFG scales: the server prewarms with its default sampling settings, so requests that override `cfg_scale_text`/`cfg_scale_speaker`, use `num_candidates > 1`, or supply reference audio capture their own graphs on first use (one-time, about a second each). `num_steps`, `seed`, `t_schedule_mode`, and `sway_coeff` can vary freely without recapture.
 

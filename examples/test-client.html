@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Irodori-TTS Server Test Client</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1c2330; --muted: #67707f;
+    --accent: #4759d6; --accent-text: #ffffff; --border: #dde1e8;
+    --ok: #1a7f4b; --warn: #b3541e; --err: #b3262a; --code-bg: #eef0f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161c; --card: #1d2027; --text: #e8eaef; --muted: #9aa2b1;
+      --accent: #7d8cf0; --accent-text: #14161c; --border: #333845;
+      --ok: #57c98b; --warn: #e2925c; --err: #e57373; --code-bg: #262a33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+    font-size: 14px; line-height: 1.6;
+  }
+  h1 { font-size: 18px; margin: 0 0 16px; }
+  h2 { font-size: 14px; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
+  .layout { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr); gap: 16px; max-width: 1100px; margin: 0 auto; }
+  @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .full { grid-column: 1 / -1; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+  input[type=text], input[type=number], textarea, select {
+    width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); font: inherit;
+  }
+  textarea { resize: vertical; min-height: 72px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .row > div { flex: 1; min-width: 110px; }
+  .checks { display: flex; gap: 16px; align-items: center; margin: 6px 0 10px; flex-wrap: wrap; }
+  .checks label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; color: var(--text); }
+  button {
+    padding: 8px 16px; border: none; border-radius: 6px; background: var(--accent);
+    color: var(--accent-text); font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button:disabled { opacity: .5; cursor: wait; }
+  .status { font-size: 12px; margin-top: 8px; white-space: pre-wrap; }
+  .status.ok { color: var(--ok); } .status.err { color: var(--err); } .status.busy { color: var(--warn); }
+  pre { background: var(--code-bg); border-radius: 6px; padding: 10px; font-size: 12px; overflow-x: auto; max-height: 260px; }
+  #sseLog { max-height: 180px; overflow-y: auto; }
+  #history { display: flex; flex-direction: column; gap: 8px; }
+  .gen { display: flex; gap: 10px; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .gen .meta { flex: 1; min-width: 0; }
+  .gen .meta .text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gen .meta .sub { font-size: 11px; color: var(--muted); }
+  .gen audio { height: 32px; max-width: 220px; }
+  a.dl { font-size: 12px; color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="layout">
+  <div class="card full">
+    <h1>Irodori-TTS Server Test Client</h1>
+    <p style="margin:0 0 10px; font-size:12px; color:var(--muted)">
+      ブラウザでこのファイルを直接開いて使えます。file:// から呼び出すため、サーバー側で
+      <code>IRODORI_CORS_ORIGINS=["*"]</code> を設定してください。
+    </p>
+    <div class="row">
+      <div style="flex:2"><label>サーバー URL</label><input type="text" id="baseUrl" value="http://127.0.0.1:8088"></div>
+      <div><label>API キー（任意）</label><input type="text" id="apiKey" placeholder="未設定なら空欄"></div>
+      <div style="flex:0; display:flex; align-items:flex-end; gap:8px">
+        <button class="secondary" id="btnHealth">ヘルスチェック</button>
+        <button class="secondary" id="btnVoices">ボイス再取得</button>
+      </div>
+    </div>
+    <div class="status" id="healthStatus">未接続。「ヘルスチェック」を押してください。</div>
+  </div>
+
+  <div class="card">
+    <h2>音声合成 (POST /v1/audio/speech)</h2>
+    <label>テキスト</label>
+    <textarea id="text">こんにちは。これはIrodori-TTSサーバーの動作確認テストです。</textarea>
+    <div class="row" style="margin-top:10px">
+      <div><label>ボイス</label><select id="voice"><option value="none">none（参照なし）</option></select></div>
+      <div><label>num_steps</label><input type="number" id="numSteps" value="40" min="1"></div>
+      <div><label>スケジュール</label>
+        <select id="schedule">
+          <option value="linear" selected>linear</option>
+          <option value="sway">sway</option>
+        </select>
+      </div>
+      <div><label>sway_coeff</label><input type="number" id="swayCoeff" value="-1.0" step="0.1"></div>
+    </div>
+    <div class="row">
+      <div><label>seed（空=ランダム）</label><input type="number" id="seed" placeholder=""></div>
+      <div><label>speed</label><input type="number" id="speed" value="1.0" step="0.05" min="0.25" max="4"></div>
+      <div style="flex:2"><label>LoRA アダプタ（ディレクトリパス、空=ベース）</label>
+        <input type="text" id="lora" placeholder="/models/adapters/speaker-a">
+      </div>
+    </div>
+    <div class="checks">
+      <label><input type="checkbox" id="hotSwap"> lora_hot_swap</label>
+      <label><input type="checkbox" id="watermark" checked> apply_watermark</label>
+      <label><input type="checkbox" id="sse"> SSE ストリーミング</label>
+      <label>chunk_min_chars <input type="number" id="chunkMin" value="80" min="1" style="width:70px"></label>
+    </div>
+    <button id="btnSpeak">合成する</button>
+    <div class="status" id="speakStatus"></div>
+  </div>
+
+  <div class="card">
+    <h2>Prewarm (POST /v1/admin/prewarm)</h2>
+    <p style="margin:0 0 10px; font-size:12px; color:var(--muted)">
+      CUDAグラフを事前キャプチャして初回リクエストから高速化します。LoRA を使う場合はそのアダプタを指定して Prewarm してください。
+      スケジュール/seed/num_steps はグラフのキーに含まれないため、Prewarm 後も自由に変更できます。
+    </p>
+    <div class="row">
+      <div style="flex:2"><label>LoRA アダプタ（任意）</label>
+        <input type="text" id="pwLora" placeholder="空 = ベースモデル">
+      </div>
+      <div><label>max_seconds</label><input type="number" id="pwMax" value="15" min="1"></div>
+    </div>
+    <div class="checks"><label><input type="checkbox" id="pwHotSwap"> lora_hot_swap</label></div>
+    <button id="btnPrewarm">Prewarm 実行</button>
+    <div class="status" id="prewarmStatus"></div>
+  </div>
+
+  <div class="card full">
+    <h2>SSE チャンク到着ログ（リクエスト開始からの経過時間）</h2>
+    <pre id="sseLog">-</pre>
+  </div>
+
+  <div class="card full">
+    <h2>生成履歴</h2>
+    <div id="history"></div>
+  </div>
+
+  <div class="card full">
+    <h2>最後のレスポンス詳細</h2>
+    <pre id="detail">-</pre>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const state = { count: 0 };
+
+function headers(json = true) {
+  const h = {};
+  if (json) h["Content-Type"] = "application/json";
+  const key = $("apiKey").value.trim();
+  if (key) h["Authorization"] = "Bearer " + key;
+  return h;
+}
+function base() { return $("baseUrl").value.trim().replace(/\/+$/, ""); }
+function setStatus(el, text, cls) { el.textContent = text; el.className = "status" + (cls ? " " + cls : ""); }
+function sseLog(line) {
+  const el = $("sseLog");
+  if (el.textContent === "-") el.textContent = "";
+  el.textContent += line + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+
+async function health() {
+  const el = $("healthStatus");
+  setStatus(el, "確認中...", "busy");
+  try {
+    const res = await fetch(base() + "/health");
+    const body = await res.json();
+    $("detail").textContent = JSON.stringify(body, null, 2);
+    const r = body.runtime, m = body.model;
+    setStatus(el,
+      `OK — model=${m.id} (${m.model_precision}/${m.codec_precision}, ${m.model_device}) | ` +
+      `loaded=${r.loaded} prewarm=${r.prewarm}\n` +
+      `prewarm_status: ${r.prewarm_status ?? "-"}`, "ok");
+  } catch (e) {
+    setStatus(el, "接続失敗: " + e.message + "\nサーバーが起動しているか、URL と CORS 設定（IRODORI_CORS_ORIGINS）を確認してください。", "err");
+  }
+}
+
+async function loadVoices() {
+  try {
+    const res = await fetch(base() + "/v1/audio/voices", { headers: headers(false) });
+    const body = await res.json();
+    const sel = $("voice");
+    const current = sel.value;
+    sel.innerHTML = '<option value="none">none（参照なし）</option>';
+    for (const v of body.data) {
+      if (v.id === "none") continue;
+      const opt = document.createElement("option");
+      opt.value = v.id; opt.textContent = v.id;
+      sel.appendChild(opt);
+    }
+    if ([...sel.options].some(o => o.value === current)) sel.value = current;
+  } catch (e) { /* health 側にエラーが出るのでここでは黙る */ }
+}
+
+function buildPayload(text) {
+  const irodori = {};
+  const steps = parseInt($("numSteps").value); if (steps) irodori.num_steps = steps;
+  irodori.t_schedule_mode = $("schedule").value;
+  const sway = parseFloat($("swayCoeff").value); if (!isNaN(sway)) irodori.sway_coeff = sway;
+  const seed = $("seed").value.trim(); if (seed !== "") irodori.seed = parseInt(seed);
+  const lora = $("lora").value.trim(); if (lora) irodori.lora_adapter = lora;
+  irodori.lora_hot_swap = $("hotSwap").checked;
+  irodori.apply_watermark = $("watermark").checked;
+  const chunkMin = parseInt($("chunkMin").value); if (chunkMin) irodori.chunk_min_chars = chunkMin;
+  return {
+    model: "irodori-tts",
+    input: text,
+    voice: $("voice").value,
+    response_format: "wav",
+    speed: parseFloat($("speed").value) || 1.0,
+    irodori,
+  };
+}
+
+function addHistory(blob, label, sub) {
+  const url = URL.createObjectURL(blob);
+  const div = document.createElement("div");
+  div.className = "gen";
+  const id = ++state.count;
+  div.innerHTML =
+    `<div class="meta"><div class="text">#${id} ${label}</div><div class="sub">${sub}</div></div>` +
+    `<audio controls src="${url}"></audio>` +
+    `<a class="dl" href="${url}" download="speech_${id}.wav">保存</a>`;
+  $("history").prepend(div);
+  return div.querySelector("audio");
+}
+
+async function speak() {
+  const el = $("speakStatus");
+  const btn = $("btnSpeak");
+  const text = $("text").value;
+  const payload = buildPayload(text);
+  btn.disabled = true;
+  const t0 = performance.now();
+  try {
+    if ($("sse").checked) {
+      await speakSSE(payload, el, t0);
+      return;
+    }
+    setStatus(el, "合成中...", "busy");
+    const res = await fetch(base() + "/v1/audio/speech", {
+      method: "POST", headers: headers(), body: JSON.stringify(payload),
+    });
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      $("detail").textContent = JSON.stringify(err, null, 2);
+      setStatus(el, `エラー ${res.status}: ${err?.error?.message ?? res.statusText}`, "err");
+      return;
+    }
+    const blob = await res.blob();
+    const seed = res.headers.get("X-Irodori-Seed");
+    const ttd = res.headers.get("X-Irodori-Total-To-Decode");
+    const sub = `往復 ${elapsed}s` +
+      (ttd ? ` | total_to_decode ${(parseFloat(ttd)).toFixed(3)}s` : "") +
+      (seed ? ` | seed ${seed}` : "") +
+      ` | voice=${payload.voice} steps=${payload.irodori.num_steps ?? "-"} sched=${payload.irodori.t_schedule_mode}` +
+      ` | lora=${payload.irodori.lora_adapter ? "on" : "base"} hot_swap=${payload.irodori.lora_hot_swap}` +
+      ` | wm=${payload.irodori.apply_watermark}`;
+    const audio = addHistory(blob, text.slice(0, 40), sub);
+    audio.play().catch(() => {});
+    setStatus(el, `完了 (${elapsed}s)` + (ttd ? ` — サーバー内 total_to_decode: ${parseFloat(ttd).toFixed(3)}s` : ""), "ok");
+  } catch (e) {
+    setStatus(el, "失敗: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function speakSSE(payload, el, t0) {
+  setStatus(el, "SSE ストリーミング中...", "busy");
+  payload.stream_format = "sse";
+  const now = () => ((performance.now() - t0) / 1000).toFixed(2);
+  sseLog(`[+0.00s] リクエスト送信: steps=${payload.irodori.num_steps} sched=${payload.irodori.t_schedule_mode} chunk_min_chars=${payload.irodori.chunk_min_chars}`);
+  const res = await fetch(base() + "/v1/audio/speech", {
+    method: "POST", headers: headers(), body: JSON.stringify(payload),
+  });
+  if (!res.ok || !res.body) {
+    const err = await res.json().catch(() => ({}));
+    setStatus(el, `エラー ${res.status}: ${err?.error?.message ?? res.statusText}`, "err");
+    sseLog(`[+${now()}s] エラー ${res.status}`);
+    $("btnSpeak").disabled = false;
+    return;
+  }
+  sseLog(`[+${now()}s] レスポンスヘッダー受信、ストリーム開始`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "", chunks = 0, prevArrival = 0;
+  const playQueue = [];
+  let playing = false;
+  const playNext = () => {
+    if (playing || playQueue.length === 0) return;
+    playing = true;
+    const audio = playQueue.shift();
+    audio.onended = () => { playing = false; playNext(); };
+    audio.play().catch(() => { playing = false; });
+  };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) >= 0) {
+        const block = buffer.slice(0, idx); buffer = buffer.slice(idx + 2);
+        const event = (block.match(/^event: (.*)$/m) ?? [])[1];
+        const dataLine = (block.match(/^data: (.*)$/m) ?? [])[1];
+        if (!event || !dataLine) continue;
+        const data = JSON.parse(dataLine);
+        if (event === "audio_chunk") {
+          chunks++;
+          const arrival = (performance.now() - t0) / 1000;
+          const delta = arrival - prevArrival; prevArrival = arrival;
+          const bin = atob(data.audio_base64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          const blob = new Blob([bytes], { type: data.media_type });
+          sseLog(
+            `[+${arrival.toFixed(2)}s] chunk ${data.index} 到着 (前チャンクから +${delta.toFixed(2)}s, ` +
+            `サーバー内 total_to_decode ${data.total_to_decode.toFixed(3)}s, ${Math.round(bytes.length / 1024)} KB): ` +
+            `「${data.text}」`);
+          const audio = addHistory(blob, `[SSE ${data.index}] ${data.text.slice(0, 30)}`,
+            `到着 +${arrival.toFixed(2)}s | total_to_decode ${data.total_to_decode.toFixed(3)}s | seed ${data.seed}`);
+          playQueue.push(audio); playNext();
+          setStatus(el, `SSE: ${chunks} チャンク受信 (+${arrival.toFixed(2)}s)`, "busy");
+        } else if (event === "error") {
+          sseLog(`[+${now()}s] エラー: ${data.error.message}`);
+          setStatus(el, "SSE エラー: " + data.error.message, "err");
+        } else if (event === "done") {
+          sseLog(`[+${now()}s] done: 全 ${data.chunks} チャンク完了`);
+          setStatus(el, `SSE 完了: ${data.chunks} チャンク (+${now()}s)`, "ok");
+        }
+      }
+    }
+  } finally {
+    $("btnSpeak").disabled = false;
+  }
+}
+
+async function prewarm() {
+  const el = $("prewarmStatus");
+  const btn = $("btnPrewarm");
+  btn.disabled = true;
+  setStatus(el, "Prewarm 実行中...（グラフ数によっては 1 分程度かかります）", "busy");
+  const body = { max_seconds: parseFloat($("pwMax").value) || 15 };
+  const lora = $("pwLora").value.trim();
+  if (lora) body.lora_adapter = lora;
+  if ($("pwHotSwap").checked) body.lora_hot_swap = true;
+  const t0 = performance.now();
+  try {
+    const res = await fetch(base() + "/v1/admin/prewarm", {
+      method: "POST", headers: headers(), body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    $("detail").textContent = JSON.stringify(data, null, 2);
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+    if (res.ok) setStatus(el, `完了 (${elapsed}s):\n${data.status}`, "ok");
+    else setStatus(el, `エラー ${res.status}: ${data?.error?.message ?? ""}`, "err");
+  } catch (e) {
+    setStatus(el, "失敗: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("btnHealth").onclick = () => { health(); loadVoices(); };
+$("btnVoices").onclick = loadVoices;
+$("btnSpeak").onclick = speak;
+$("btnPrewarm").onclick = prewarm;
+health(); loadVoices();
+</script>
+</body>
+</html>
