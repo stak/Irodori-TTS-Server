@@ -264,8 +264,10 @@ async function speak() {
     const blob = await res.blob();
     const seed = res.headers.get("X-Irodori-Seed");
     const ttd = res.headers.get("X-Irodori-Total-To-Decode");
+    const enc = res.headers.get("X-Irodori-Encode-Seconds");
     const sub = `往復 ${elapsed}s` +
       (ttd ? ` | total_to_decode ${(parseFloat(ttd)).toFixed(3)}s` : "") +
+      (enc ? ` | encode ${(parseFloat(enc)).toFixed(3)}s` : "") +
       (seed ? ` | seed ${seed}` : "") +
       ` | fmt=${payload.response_format} (${Math.round(blob.size / 1024)} KB)` +
       ` | voice=${payload.voice} steps=${payload.irodori.num_steps ?? "-"} sched=${payload.irodori.t_schedule_mode}` +
@@ -329,12 +331,13 @@ async function speakSSE(payload, el, t0) {
           const bytes = new Uint8Array(bin.length);
           for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
           const blob = new Blob([bytes], { type: data.media_type });
+          const encNote = data.encode_seconds != null ? `, encode ${data.encode_seconds.toFixed(3)}s` : "";
           sseLog(
             `[+${arrival.toFixed(2)}s] chunk ${data.index} 到着 (前チャンクから +${delta.toFixed(2)}s, ` +
-            `サーバー内 total_to_decode ${data.total_to_decode.toFixed(3)}s, ${Math.round(bytes.length / 1024)} KB): ` +
+            `サーバー内 total_to_decode ${data.total_to_decode.toFixed(3)}s${encNote}, ${Math.round(bytes.length / 1024)} KB): ` +
             `「${data.text}」`);
           const audio = addHistory(blob, `[SSE ${data.index}] ${data.text.slice(0, 30)}`,
-            `到着 +${arrival.toFixed(2)}s | total_to_decode ${data.total_to_decode.toFixed(3)}s | seed ${data.seed}`,
+            `到着 +${arrival.toFixed(2)}s | total_to_decode ${data.total_to_decode.toFixed(3)}s${encNote} | seed ${data.seed}`,
             data.format);
           playQueue.push(audio); playNext();
           setStatus(el, `SSE: ${chunks} チャンク受信 (+${arrival.toFixed(2)}s)`, "busy");

@@ -140,7 +140,12 @@ if settings.cors_origins:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Irodori-Seed", "X-Irodori-Total-To-Decode", "X-Irodori-Messages"],
+        expose_headers=[
+            "X-Irodori-Seed",
+            "X-Irodori-Total-To-Decode",
+            "X-Irodori-Encode-Seconds",
+            "X-Irodori-Messages",
+        ],
     )
 
 
@@ -407,6 +412,7 @@ async def create_speech(payload: SpeechRequest) -> Response:
         raise
     finally:
         _release_synthesis_slot(synthesis_semaphore)
+    encode_started_at = time.perf_counter()
     audio_bytes = await _run_blocking(
         encode_audio,
         result.audio,
@@ -415,18 +421,24 @@ async def create_speech(payload: SpeechRequest) -> Response:
         mp3_bitrate_mode=settings.mp3_bitrate_mode,
         mp3_compression_level=settings.mp3_compression_level,
     )
+    encode_seconds = time.perf_counter() - encode_started_at
     logger.info(
-        "speech synthesis completed: elapsed=%.2fs audio_seconds=%.2f bytes=%d seed=%s",
+        "speech synthesis completed: elapsed=%.2fs audio_seconds=%.2f bytes=%d seed=%s "
+        "total_to_decode=%.3fs encode=%.3fs format=%s",
         time.perf_counter() - request_started_at,
         _audio_duration_seconds(result.audio, result.sample_rate),
         len(audio_bytes),
         result.used_seed,
+        result.total_to_decode,
+        encode_seconds,
+        response_format,
     )
 
     headers = {
         "Content-Disposition": f'attachment; filename="speech.{response_format}"',
         "X-Irodori-Seed": str(result.used_seed),
         "X-Irodori-Total-To-Decode": f"{result.total_to_decode:.6f}",
+        "X-Irodori-Encode-Seconds": f"{encode_seconds:.6f}",
     }
     if result.messages:
         headers["X-Irodori-Messages"] = " | ".join(result.messages)[0:4096]
@@ -703,6 +715,7 @@ def _stream_speech_response(
                     )
                 finally:
                     _release_synthesis_slot(synthesis_semaphore)
+                encode_started_at = time.perf_counter()
                 audio_bytes = await _run_stream_blocking(
                     encode_audio,
                     result.audio,
@@ -711,13 +724,18 @@ def _stream_speech_response(
                     mp3_bitrate_mode=settings.mp3_bitrate_mode,
                     mp3_compression_level=settings.mp3_compression_level,
                 )
+                encode_seconds = time.perf_counter() - encode_started_at
                 completed += 1
                 logger.info(
-                    "speech stream chunk %d/%d completed: audio_seconds=%.2f bytes=%d",
+                    "speech stream chunk %d/%d completed: audio_seconds=%.2f bytes=%d "
+                    "total_to_decode=%.3fs encode=%.3fs format=%s",
                     index + 1,
                     len(chunks),
                     _audio_duration_seconds(result.audio, result.sample_rate),
                     len(audio_bytes),
+                    result.total_to_decode,
+                    encode_seconds,
+                    response_format,
                 )
                 yield _sse_event(
                     "audio_chunk",
@@ -729,6 +747,7 @@ def _stream_speech_response(
                         "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
                         "seed": result.used_seed,
                         "total_to_decode": result.total_to_decode,
+                        "encode_seconds": round(encode_seconds, 6),
                     },
                 )
         except RuntimeLoadTimeoutError as exc:
