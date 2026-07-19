@@ -1118,6 +1118,86 @@ def test_speech_explicit_chunks_rejects_invalid_values(monkeypatch, chunks):
     assert runtime.texts == []
 
 
+def test_speech_chunk_pause_inserts_silence_between_chunks(monkeypatch):
+    import soundfile as sf
+
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。"],
+                "chunking_enabled": False,
+                "chunk_pause_seconds": 0.5,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    from io import BytesIO
+
+    data, sample_rate = sf.read(BytesIO(response.content))
+    assert sample_rate == 1000
+    # FakeRuntime emits len(text) * 10 samples per chunk; 0.5 s pause = 500.
+    assert len(data) == 40 + 500 + 40
+
+
+def test_speech_chunk_pause_defaults_to_gapless(monkeypatch):
+    import soundfile as sf
+
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。"],
+                "chunking_enabled": False,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    from io import BytesIO
+
+    data, _ = sf.read(BytesIO(response.content))
+    assert len(data) == 80
+
+
+def test_speech_chunk_pause_rejects_negative_values(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。"],
+                "chunk_pause_seconds": -0.5,
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "chunk_pause_seconds" in response.json()["error"]["message"]
+    assert runtime.texts == []
+
+
 def test_speech_chunking_does_not_split_at_commas(monkeypatch):
     runtime = FakeRuntime()
     monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))

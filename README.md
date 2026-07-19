@@ -310,6 +310,7 @@ Common `irodori` options:
 | `chunking_enabled` | Enable or disable automatic long text chunking for this request. |
 | `chunk_min_chars` | Minimum non-space characters before a chunk split point is used. |
 | `first_sentence_chunk_min_chars` | Optional minimum non-space characters used only for splitting the first sentence. |
+| `chunk_pause_seconds` | Silence inserted between chunks when the server concatenates them into one response (default `0`, current behavior). Not applied on the SSE path, where the client receives chunks individually. |
 | `caption` | Voice/style description for caption-enabled VoiceDesign checkpoints. Ignored by checkpoints without caption conditioning. |
 | `cfg_scale_caption` | Strength of caption guidance. |
 | `max_caption_len` | Optional maximum caption token length. |
@@ -411,7 +412,7 @@ Set `irodori.first_sentence_chunk_min_chars` to use a smaller threshold only
 for the first sentence. Later sentences keep the normal `chunk_min_chars`
 threshold.
 
-Each chunk is synthesized sequentially, then concatenated into one audio response.
+Each chunk is synthesized sequentially, then concatenated into one audio response. Chunks are joined back-to-back by default; set `irodori.chunk_pause_seconds` to insert that much silence at each join (tail silence is already trimmed by `trim_tail`, so the inserted pause is well-defined).
 
 Per-request override:
 

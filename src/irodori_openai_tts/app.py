@@ -81,6 +81,7 @@ class IrodoriOptions(BaseModel):
     chunking_enabled: bool | None = None
     chunk_min_chars: int | None = None
     first_sentence_chunk_min_chars: int | None = None
+    chunk_pause_seconds: float | None = None
 
 
 class SpeechRequest(BaseModel):
@@ -387,6 +388,7 @@ async def create_speech(payload: SpeechRequest) -> Response:
         sampling_request = _build_sampling_request(payload, voice)
         _validate_sampling_request(sampling_request)
         chunks = _speech_chunks(payload, sampling_request)
+        chunk_pause_seconds = _chunk_pause_seconds(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TypeError as exc:
@@ -406,7 +408,12 @@ async def create_speech(payload: SpeechRequest) -> Response:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     synthesis_semaphore = await _acquire_synthesis_slot()
     try:
-        result = await _synthesize_chunks(runtime, sampling_request, chunks)
+        result = await _synthesize_chunks(
+            runtime,
+            sampling_request,
+            chunks,
+            chunk_pause_seconds=chunk_pause_seconds,
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -680,10 +687,28 @@ def _split_text_for_speech(
     return chunks or [text]
 
 
+def _chunk_pause_seconds(payload: SpeechRequest) -> float:
+    value = _as_float(
+        _coalesce(
+            payload.irodori.chunk_pause_seconds,
+            _extra(payload, "chunk_pause_seconds"),
+            0.0,
+        ),
+        "chunk_pause_seconds",
+    )
+    if value < 0.0:
+        raise HTTPException(
+            status_code=400, detail="chunk_pause_seconds must be zero or greater."
+        )
+    return value
+
+
 async def _synthesize_chunks(
     runtime: Any,
     sampling_request: SamplingRequest,
     chunks: list[str],
+    *,
+    chunk_pause_seconds: float = 0.0,
 ) -> SamplingResult:
     if len(chunks) == 1:
         return await _run_blocking(
@@ -713,7 +738,16 @@ async def _synthesize_chunks(
     if any(result.sample_rate != sample_rate for result in results):
         raise RuntimeError("Chunk sample rates did not match.")
 
-    audio = torch.cat([_audio_as_channels_first(result.audio) for result in results], dim=-1)
+    pause_samples = int(round(float(chunk_pause_seconds) * float(sample_rate)))
+    audio_parts: list[torch.Tensor] = []
+    for result in results:
+        part = _audio_as_channels_first(result.audio)
+        if audio_parts and pause_samples > 0:
+            audio_parts.append(
+                torch.zeros((part.shape[0], pause_samples), dtype=part.dtype)
+            )
+        audio_parts.append(part)
+    audio = torch.cat(audio_parts, dim=-1)
     messages = [message for result in results for message in result.messages]
     stage_timings = [
         (f"chunk_{index}:{name}", seconds)
