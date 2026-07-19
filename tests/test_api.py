@@ -115,6 +115,8 @@ def test_health_does_not_load_model(tmp_path, monkeypatch):
     assert body["runtime"]["prewarm_status"] is None
     assert body["defaults"]["lora_hot_swap"] is False
     assert body["defaults"]["apply_watermark"] is True
+    assert body["defaults"]["mp3_bitrate_mode"] == "VARIABLE"
+    assert body["defaults"]["mp3_compression_level"] == 0.0
 
 
 def test_startup_prewarms_when_enabled(monkeypatch):
@@ -273,6 +275,7 @@ def test_speech_stream_format_sse_emits_audio_chunk(monkeypatch):
     assert audio_chunk["media_type"] == "audio/wav"
     assert audio_chunk["seed"] == 123
     assert audio_chunk["total_to_decode"] == 0.1
+    assert audio_chunk["encode_seconds"] >= 0.0
     assert base64.b64decode(audio_chunk["audio_base64"]).startswith(b"RIFF")
     assert events[1][1] == {"chunks": 1}
 
@@ -500,6 +503,7 @@ def test_speech_uses_uploaded_voice_and_returns_headers(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.headers["x-irodori-seed"] == "123"
     assert response.headers["x-irodori-total-to-decode"] == "0.100000"
+    assert float(response.headers["x-irodori-encode-seconds"]) >= 0.0
     assert response.content.startswith(b"RIFF")
     assert runtime.texts == ["こんにちは。"]
 
