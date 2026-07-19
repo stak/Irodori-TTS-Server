@@ -940,8 +940,8 @@ def test_speech_chunking_uses_first_sentence_min_chars_only_for_first_split(monk
 
     assert response.status_code == 200
     assert runtime.texts == [
-        "最初は速く、",
-        "すぐ返します。次は長くて、通常のままです。",
+        "最初は速く、すぐ返します。",
+        "次は長くて、通常のままです。",
     ]
 
 
@@ -966,8 +966,8 @@ def test_speech_chunking_uses_default_first_sentence_min_chars(monkeypatch):
 
     assert response.status_code == 200
     assert runtime.texts == [
-        "最初は速く、",
-        "すぐ返します。次は長くて、通常のままです。",
+        "最初は速く、すぐ返します。",
+        "次は長くて、通常のままです。",
     ]
 
 
@@ -993,6 +993,368 @@ def test_speech_chunking_explicit_null_disables_default_first_sentence_min_chars
 
     assert response.status_code == 200
     assert runtime.texts == ["最初は速く、すぐ返します。次は長くて、通常のままです。"]
+
+
+def test_speech_explicit_chunks_take_precedence_over_input(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "この入力は合成されません。",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。三文目。"],
+                "chunking_enabled": False,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.texts == ["一文目。", "二文目。三文目。"]
+
+
+def test_speech_explicit_chunks_are_further_split_when_chunking_enabled(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": [
+                    "短い一文目。",
+                    "二番目のチャンクは長いので分割されます。そのはずです。ここが三分割目。",
+                ],
+                "chunking_enabled": True,
+                "chunk_min_chars": 5,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.texts == [
+        "短い一文目。",
+        "二番目のチャンクは長いので分割されます。",
+        "そのはずです。",
+        "ここが三分割目。",
+    ]
+
+
+def test_speech_explicit_chunks_never_merge_across_boundaries(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                # each entry is far below chunk_min_chars, but boundaries hold
+                "chunks": ["短い。", "これも短い。"],
+                "chunking_enabled": True,
+                "chunk_min_chars": 80,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.texts == ["短い。", "これも短い。"]
+
+
+def test_speech_explicit_chunks_rejects_seconds(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。"],
+                "seconds": 5.0,
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "seconds" in response.json()["error"]["message"]
+    assert runtime.texts == []
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [[], ["一文目。", "   "], ["一文目。", 42], "一文目。"],
+)
+def test_speech_explicit_chunks_rejects_invalid_values(monkeypatch, chunks):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {"chunks": chunks},
+        },
+    )
+
+    assert response.status_code in {400, 422}
+    assert runtime.texts == []
+
+
+def test_speech_chunk_pause_inserts_silence_between_chunks(monkeypatch):
+    import soundfile as sf
+
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。"],
+                "chunking_enabled": False,
+                "chunk_pause_seconds": 0.5,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    from io import BytesIO
+
+    data, sample_rate = sf.read(BytesIO(response.content))
+    assert sample_rate == 1000
+    # FakeRuntime emits len(text) * 10 samples per chunk; 0.5 s pause = 500.
+    assert len(data) == 40 + 500 + 40
+
+
+def test_speech_chunk_pause_defaults_to_gapless(monkeypatch):
+    import soundfile as sf
+
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。"],
+                "chunking_enabled": False,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    from io import BytesIO
+
+    data, _ = sf.read(BytesIO(response.content))
+    assert len(data) == 80
+
+
+def test_speech_chunk_pause_rejects_negative_values(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。"],
+                "chunk_pause_seconds": -0.5,
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "chunk_pause_seconds" in response.json()["error"]["message"]
+    assert runtime.texts == []
+
+
+def test_speech_chain_reference_feeds_previous_tail_to_next_chunk(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+    long_first = "あ" * 59 + "。"  # FakeRuntime emits 600 samples at 1000 Hz
+    long_second = "い" * 59 + "。"
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": [long_first, long_second, "短い。"],
+                "chunking_enabled": False,
+                "chain_reference": True,
+                "chain_reference_seconds": 0.5,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    first, second, third = runtime.requests
+    assert first.ref_audio is None
+    assert first.no_ref is True
+    assert second.no_ref is False
+    assert second.ref_audio.shape == (1, 500)  # fixed 0.5 s window at 1000 Hz
+    assert second.ref_audio_sample_rate == 1000
+    assert second.ref_wav is None and second.ref_latent is None and second.ref_embed is None
+    assert third.ref_audio.shape == (1, 500)
+
+
+def test_speech_chain_reference_applies_on_sse_path(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+    long_first = "あ" * 59 + "。"
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "stream_format": "sse",
+            "irodori": {
+                "chunks": [long_first, "短い。"],
+                "chunking_enabled": False,
+                "chain_reference": True,
+                "chain_reference_seconds": 0.5,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    events = sse_events(response.text)
+    assert [event for event, _data in events] == ["audio_chunk", "audio_chunk", "done"]
+    assert runtime.requests[0].ref_audio is None
+    assert runtime.requests[1].ref_audio.shape == (1, 500)
+    assert runtime.requests[1].no_ref is False
+
+
+def test_speech_chain_reference_uses_whole_audio_when_shorter_than_window(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["短い。", "次。"],
+                "chunking_enabled": False,
+                "chain_reference": True,
+                "chain_reference_seconds": 3.0,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    # first chunk yields 30 samples (< 3 s window); the tail is the whole audio
+    assert runtime.requests[1].ref_audio.shape == (1, 30)
+
+
+def test_speech_chain_reference_rejected_without_ref_audio_support(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+    monkeypatch.setattr(main, "_SUPPORTS_REF_AUDIO", False)
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。"],
+                "chain_reference": True,
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "chain_reference requires" in response.json()["error"]["message"]
+    assert runtime.texts == []
+
+
+def test_speech_chain_reference_rejects_non_positive_window(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。"],
+                "chain_reference": True,
+                "chain_reference_seconds": 0,
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "chain_reference_seconds" in response.json()["error"]["message"]
+    assert runtime.texts == []
+
+
+def test_speech_chunking_does_not_split_at_commas(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+    text = "読点が、いくつも、続いても、文が終わるまでは、切りません。ここで切れます。"
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": text,
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunking_enabled": True,
+                "chunk_min_chars": 5,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.texts == ["読点が、いくつも、続いても、文が終わるまでは、切りません。", "ここで切れます。"]
 
 
 def test_speech_chunking_does_not_split_shorter_first_sentence(monkeypatch):
