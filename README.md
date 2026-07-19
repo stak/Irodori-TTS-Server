@@ -402,7 +402,9 @@ Long text chunking is enabled by default.
 When enabled, the server splits text only when both conditions are met:
 
 - the current chunk has at least `chunk_min_chars` non-space characters
-- the current character is punctuation or a line break
+- the current character is sentence-ending punctuation (`。．.!！?？`) or a line break
+
+Commas (`、，,`) are intentionally not split points: Irodori-TTS conditions its output on the whole text of a chunk, so splitting mid-sentence loses cross-chunk nuance.
 
 Set `irodori.first_sentence_chunk_min_chars` to use a smaller threshold only
 for the first sentence. Later sentences keep the normal `chunk_min_chars`

@@ -26,7 +26,9 @@ from .runtime import RuntimeLoadTimeoutError, RuntimeManager
 from .voices import VoiceRegistry, VoiceSpec
 
 logger = logging.getLogger(__name__)
-CHUNK_BOUNDARIES = frozenset("。、，,．.!！?？\n\r")
+# Sentence-ending punctuation and line breaks only: splitting mid-sentence at
+# commas costs too much cross-chunk context for the quality it buys.
+CHUNK_BOUNDARIES = frozenset("。．.!！?？\n\r")
 _synthesis_semaphore: asyncio.Semaphore | None = None
 _synthesis_semaphore_limit: int | None = None
 

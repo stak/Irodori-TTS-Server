@@ -940,8 +940,8 @@ def test_speech_chunking_uses_first_sentence_min_chars_only_for_first_split(monk
 
     assert response.status_code == 200
     assert runtime.texts == [
-        "最初は速く、",
-        "すぐ返します。次は長くて、通常のままです。",
+        "最初は速く、すぐ返します。",
+        "次は長くて、通常のままです。",
     ]
 
 
@@ -966,8 +966,8 @@ def test_speech_chunking_uses_default_first_sentence_min_chars(monkeypatch):
 
     assert response.status_code == 200
     assert runtime.texts == [
-        "最初は速く、",
-        "すぐ返します。次は長くて、通常のままです。",
+        "最初は速く、すぐ返します。",
+        "次は長くて、通常のままです。",
     ]
 
 
@@ -993,6 +993,29 @@ def test_speech_chunking_explicit_null_disables_default_first_sentence_min_chars
 
     assert response.status_code == 200
     assert runtime.texts == ["最初は速く、すぐ返します。次は長くて、通常のままです。"]
+
+
+def test_speech_chunking_does_not_split_at_commas(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+    text = "読点が、いくつも、続いても、文が終わるまでは、切りません。ここで切れます。"
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": text,
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunking_enabled": True,
+                "chunk_min_chars": 5,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.texts == ["読点が、いくつも、続いても、文が終わるまでは、切りません。", "ここで切れます。"]
 
 
 def test_speech_chunking_does_not_split_shorter_first_sentence(monkeypatch):
