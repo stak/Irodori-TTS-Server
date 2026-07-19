@@ -92,6 +92,7 @@ class SpeechRequest(BaseModel):
     voice: str | dict[str, Any] | None = None
     response_format: str | None = None
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    n: int | None = None
     stream_format: str | None = None
     irodori: IrodoriOptions = Field(default_factory=IrodoriOptions)
 
@@ -220,6 +221,8 @@ def health() -> dict[str, Any]:
             "response_format": settings.default_response_format,
             "mp3_bitrate_mode": settings.mp3_bitrate_mode,
             "mp3_compression_level": settings.mp3_compression_level,
+            "num_candidates": settings.default_num_candidates,
+            "max_num_candidates": settings.max_num_candidates,
             "chunking_enabled": settings.default_chunking_enabled,
             "chunk_min_chars": settings.default_chunk_min_chars,
             "first_sentence_chunk_min_chars": settings.default_first_sentence_chunk_min_chars,
@@ -387,7 +390,18 @@ async def create_speech(payload: SpeechRequest) -> Response:
     try:
         sampling_request = _build_sampling_request(payload, voice)
         _validate_sampling_request(sampling_request)
-        chunks = _speech_chunks(payload, sampling_request)
+        multi_candidate = sampling_request.num_candidates > 1
+        if multi_candidate:
+            _validate_multi_candidate_payload(payload, stream_as_sse)
+            # Candidates are generated in one batched sampling pass, so the
+            # whole input is synthesized as a single chunk.
+            chunks = [payload.input]
+            logger.info(
+                "speech chunking skipped: num_candidates=%d",
+                sampling_request.num_candidates,
+            )
+        else:
+            chunks = _speech_chunks(payload, sampling_request)
         chunk_pause_seconds = _chunk_pause_seconds(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -422,6 +436,12 @@ async def create_speech(payload: SpeechRequest) -> Response:
         raise
     finally:
         _release_synthesis_slot(synthesis_semaphore)
+    if multi_candidate:
+        return await _candidates_response(
+            result,
+            response_format,
+            request_started_at,
+        )
     encode_started_at = time.perf_counter()
     audio_bytes = await _run_blocking(
         encode_audio,
@@ -458,6 +478,82 @@ async def create_speech(payload: SpeechRequest) -> Response:
         media_type=CONTENT_TYPES[response_format],
         headers=headers,
     )
+
+
+async def _candidates_response(
+    result: SamplingResult,
+    response_format: str,
+    request_started_at: float,
+) -> JSONResponse:
+    encode_started_at = time.perf_counter()
+    candidates: list[dict[str, Any]] = []
+    for index, candidate_audio in enumerate(result.audios):
+        audio_bytes = await _run_blocking(
+            encode_audio,
+            candidate_audio,
+            result.sample_rate,
+            response_format,
+            mp3_bitrate_mode=settings.mp3_bitrate_mode,
+            mp3_compression_level=settings.mp3_compression_level,
+        )
+        candidates.append(
+            {
+                "index": index,
+                "audio": base64.b64encode(audio_bytes).decode("ascii"),
+                "format": response_format,
+                "media_type": CONTENT_TYPES[response_format],
+                # The runtime draws one noise batch from a single seed, so all
+                # candidates share it. Reproduce candidate i by re-sending the
+                # request with this seed and the same n, then taking index i.
+                "seed": result.used_seed,
+                "duration_sec": round(
+                    _audio_duration_seconds(candidate_audio, result.sample_rate), 6
+                ),
+            }
+        )
+    encode_seconds = time.perf_counter() - encode_started_at
+    logger.info(
+        "speech synthesis completed: elapsed=%.2fs candidates=%d seed=%s "
+        "total_to_decode=%.3fs encode=%.3fs format=%s",
+        time.perf_counter() - request_started_at,
+        len(candidates),
+        result.used_seed,
+        result.total_to_decode,
+        encode_seconds,
+        response_format,
+    )
+
+    headers = {
+        "X-Irodori-Seed": str(result.used_seed),
+        "X-Irodori-Total-To-Decode": f"{result.total_to_decode:.6f}",
+        "X-Irodori-Encode-Seconds": f"{encode_seconds:.6f}",
+    }
+    if result.messages:
+        headers["X-Irodori-Messages"] = " | ".join(result.messages)[0:4096]
+
+    return JSONResponse(
+        content={
+            "object": "speech.candidates",
+            "seed": result.used_seed,
+            "sample_rate": result.sample_rate,
+            "candidates": candidates,
+        },
+        headers=headers,
+    )
+
+
+def _validate_multi_candidate_payload(payload: SpeechRequest, stream_as_sse: bool) -> None:
+    if stream_as_sse:
+        raise HTTPException(
+            status_code=400,
+            detail="n > 1 cannot be combined with stream_format='sse'.",
+        )
+    if _explicit_chunk_list(payload) is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="n > 1 cannot be combined with chunks; "
+            "candidates are generated from the whole input in a single batched pass.",
+        )
 
 
 def _stream_format_is_sse(stream_format: str | None) -> bool:
@@ -958,6 +1054,7 @@ def _build_sampling_request(payload: SpeechRequest, voice: VoiceSpec) -> Samplin
         ),
         num_candidates=_as_int(
             _coalesce(
+                payload.n,
                 opts.num_candidates,
                 _extra(payload, "num_candidates"),
                 settings.default_num_candidates,
@@ -1147,6 +1244,18 @@ def _validate_sampling_request(request: SamplingRequest) -> None:
     if request.max_seconds < request.min_seconds:
         raise HTTPException(
             status_code=400, detail="max_seconds must be greater than or equal to min_seconds."
+        )
+    if request.num_candidates < 1:
+        raise HTTPException(status_code=400, detail="n (num_candidates) must be at least 1.")
+    max_candidates = max(1, int(settings.max_num_candidates))
+    if request.num_candidates > max_candidates:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"n (num_candidates) must be at most {max_candidates} "
+                f"(got {request.num_candidates}). "
+                "Raise IRODORI_MAX_NUM_CANDIDATES to allow more."
+            ),
         )
 
 
