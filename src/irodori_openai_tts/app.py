@@ -486,6 +486,11 @@ async def _candidates_response(
     request_started_at: float,
 ) -> JSONResponse:
     encode_started_at = time.perf_counter()
+    # getattr: irodori-tts builds before the per-candidate-seeds patch have no
+    # used_seeds field; the seeds are derivable either way.
+    candidate_seeds = getattr(result, "used_seeds", None) or [
+        result.used_seed + index for index in range(len(result.audios))
+    ]
     candidates: list[dict[str, Any]] = []
     for index, candidate_audio in enumerate(result.audios):
         audio_bytes = await _run_blocking(
@@ -502,10 +507,10 @@ async def _candidates_response(
                 "audio": base64.b64encode(audio_bytes).decode("ascii"),
                 "format": response_format,
                 "media_type": CONTENT_TYPES[response_format],
-                # The runtime draws one noise batch from a single seed, so all
-                # candidates share it. Reproduce candidate i by re-sending the
-                # request with this seed and the same n, then taking index i.
-                "seed": result.used_seed,
+                # Candidate i is drawn from base seed + i, so it can be
+                # regenerated alone by re-sending the request with n=1 and
+                # this seed.
+                "seed": candidate_seeds[index],
                 "duration_sec": round(
                     _audio_duration_seconds(candidate_audio, result.sample_rate), 6
                 ),

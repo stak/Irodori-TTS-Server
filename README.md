@@ -303,19 +303,35 @@ With `n > 1` the response is JSON instead of raw audio bytes:
   "sample_rate": 44100,
   "candidates": [
     {"index": 0, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1234, "duration_sec": 3.2},
-    {"index": 1, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1234, "duration_sec": 3.4},
-    {"index": 2, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1234, "duration_sec": 3.1}
+    {"index": 1, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1235, "duration_sec": 3.4},
+    {"index": 2, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1236, "duration_sec": 3.1}
   ]
 }
 ```
 
-Seed semantics: the runtime draws the initial noise for the whole batch from a
-single seed, so all candidates share one `seed` value (candidates still differ
-because each occupies its own row of the noise batch). **To reproduce a chosen
-candidate, re-send the identical request with `irodori.seed` set to the
-returned `seed` and the same `n`, then take the same `index`.** Sending the
-seed with `n: 1` does not reproduce candidates other than the whole-batch
-first draw, and is not guaranteed to reproduce even that on CUDA.
+Seed semantics: candidate `i` draws its initial noise from its own generator
+seeded with `base seed + i`. The response's top-level `seed` is the base seed
+and each candidate carries its own derived `seed`. Two ways to bring a chosen
+candidate back:
+
+- **Standalone regeneration** — re-send the request with `n: 1` and
+  `irodori.seed` set to the candidate's `seed`. This draws bit-identical
+  initial noise, i.e. the same take. It is NOT bit-exact against the batched
+  output on CUDA: kernel numerics differ between batch sizes and the
+  diffusion steps amplify them chaotically. Measured on an RTX 4090 (bf16):
+  duration always identical, waveform correlation 0.88–0.99 depending on the
+  draw — treat it as "the same take, re-rendered", not as a copy. When the
+  archived bytes must match, use the bit-exact path below.
+- **Bit-exact reproduction** — re-send the identical request (same
+  `irodori.seed`, same `n`) and take the same `index`. Warm responses
+  reproduce bit-exactly; only the very first request at a new batch shape
+  (CUDA graph capture) can deviate negligibly (measured max abs sample
+  difference 1.6e-3, correlation 1.000000).
+
+Per-candidate seeds require an `irodori-tts` build with the
+per-candidate-seeds patch (candidate noise drawn per row from `seed + i`);
+with older builds all candidates share the base seed and only the bit-exact
+path applies.
 
 Restrictions with `n > 1`:
 

@@ -36,14 +36,16 @@ class FakeRuntime:
             torch.full((1, max(1, len(req.text)) * 10), index * 1e-3)
             for index in range(num_candidates)
         ]
+        used_seed = 123 if req.seed is None else int(req.seed)
         return SamplingResult(
             audio=audios[0],
             audios=audios,
             sample_rate=1000,
             stage_timings=[],
             total_to_decode=0.1,
-            used_seed=123 if req.seed is None else int(req.seed),
+            used_seed=used_seed,
             messages=[],
+            used_seeds=[used_seed + index for index in range(num_candidates)],
         )
 
 
@@ -1400,10 +1402,11 @@ def test_speech_n_returns_json_candidates(monkeypatch):
     assert body["seed"] == 123
     assert body["sample_rate"] == 1000
     assert [candidate["index"] for candidate in body["candidates"]] == [0, 1, 2]
+    # Candidate i is generated from base seed + i and carries its own seed.
+    assert [candidate["seed"] for candidate in body["candidates"]] == [123, 124, 125]
     for candidate in body["candidates"]:
         assert candidate["format"] == "wav"
         assert candidate["media_type"] == "audio/wav"
-        assert candidate["seed"] == 123
         assert candidate["duration_sec"] > 0.0
         assert base64.b64decode(candidate["audio"]).startswith(b"RIFF")
     # FakeRuntime emits distinct samples per candidate; encoded bytes differ.
@@ -1412,7 +1415,7 @@ def test_speech_n_returns_json_candidates(monkeypatch):
     assert runtime.texts == ["こんにちは。"]
 
 
-def test_speech_n_reproduces_batch_from_request_seed(monkeypatch):
+def test_speech_n_derives_candidate_seeds_from_request_seed(monkeypatch):
     runtime = FakeRuntime()
     monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
 
@@ -1431,7 +1434,7 @@ def test_speech_n_reproduces_batch_from_request_seed(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["seed"] == 777
-    assert [candidate["seed"] for candidate in body["candidates"]] == [777, 777]
+    assert [candidate["seed"] for candidate in body["candidates"]] == [777, 778]
     assert runtime.requests[0].seed == 777
     assert runtime.requests[0].num_candidates == 2
 
