@@ -311,6 +311,8 @@ Common `irodori` options:
 | `chunk_min_chars` | Minimum non-space characters before a chunk split point is used. |
 | `first_sentence_chunk_min_chars` | Optional minimum non-space characters used only for splitting the first sentence. |
 | `chunk_pause_seconds` | Silence inserted between chunks when the server concatenates them into one response (default `0`, current behavior). Not applied on the SSE path, where the client receives chunks individually. |
+| `chain_reference` | Feed the tail of each chunk's generated audio to the next chunk as an in-memory reference so tone and delivery carry across chunk boundaries. Default `false`. Chunks after the first override the request's voice/reference. Requires an irodori-tts build with `SamplingRequest.ref_audio`. |
+| `chain_reference_seconds` | Length of the previous-chunk tail used as the chained reference (default `3.0`). |
 | `caption` | Voice/style description for caption-enabled VoiceDesign checkpoints. Ignored by checkpoints without caption conditioning. |
 | `cfg_scale_caption` | Strength of caption guidance. |
 | `max_caption_len` | Optional maximum caption token length. |
@@ -452,6 +454,31 @@ Irodori-TTS conditions its output on the whole text of a chunk, so where the spl
 - `input` remains required (OpenAI SDK compatibility) but is not synthesized when `chunks` is present — set it to the joined text or a placeholder.
 - With `chunking_enabled: true` (the default) each entry may still be split further by the automatic splitter; send `chunking_enabled: false` for exact control.
 - Cannot be combined with `irodori.seconds` (HTTP 400): a single fixed duration is ambiguous across chunks.
+
+### Reference chaining
+
+Each chunk is normally synthesized without knowledge of its neighbors, so tone and delivery can jump at chunk boundaries. With `irodori.chain_reference: true`, the server feeds the tail of each generated chunk (the last `chain_reference_seconds`, default 3 s) into the next chunk as an in-memory reference:
+
+```json
+{
+  "model": "irodori-tts",
+  "input": "長い本文...",
+  "voice": "none",
+  "irodori": {
+    "chain_reference": true,
+    "chain_reference_seconds": 3.0,
+    "lora_adapter": "/models/adapters/speaker-a"
+  }
+}
+```
+
+Notes:
+
+- The first chunk uses the request's voice as-is; later chunks replace any requested voice/reference with the chained tail. Voice identity is best pinned with a LoRA adapter; the chained reference then mainly carries tone and delivery.
+- The reference guidance strength is the existing `cfg_scale_speaker`; lower it if chunks imitate the previous chunk too strongly.
+- The fixed-size tail window keeps the reference conditioning shape constant, so captured CUDA graphs are reused across chunks and requests (the first chained request pays a one-time capture per length bucket; the runtime cache is bounded by `IRODORI_CUDA_GRAPH_CACHE`).
+- Works with both the concatenated response and SSE streaming.
+- Requires the irodori-tts dependency to support `SamplingRequest.ref_audio` (in-memory reference); the server returns HTTP 400 with a clear message otherwise.
 
 ## Request Queue
 

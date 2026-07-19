@@ -7,6 +7,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import fields as dataclass_fields
 from dataclasses import replace
 from functools import partial
 from typing import Any, Literal
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 # Sentence-ending punctuation and line breaks only: splitting mid-sentence at
 # commas costs too much cross-chunk context for the quality it buys.
 CHUNK_BOUNDARIES = frozenset("。．.!！?？\n\r")
+# In-memory reference audio landed in the irodori-tts fork after the initial
+# release; chain_reference needs it.
+_SUPPORTS_REF_AUDIO = "ref_audio" in {field.name for field in dataclass_fields(SamplingRequest)}
 _synthesis_semaphore: asyncio.Semaphore | None = None
 _synthesis_semaphore_limit: int | None = None
 
@@ -82,6 +86,8 @@ class IrodoriOptions(BaseModel):
     chunk_min_chars: int | None = None
     first_sentence_chunk_min_chars: int | None = None
     chunk_pause_seconds: float | None = None
+    chain_reference: bool | None = None
+    chain_reference_seconds: float | None = None
 
 
 class SpeechRequest(BaseModel):
@@ -389,10 +395,18 @@ async def create_speech(payload: SpeechRequest) -> Response:
         _validate_sampling_request(sampling_request)
         chunks = _speech_chunks(payload, sampling_request)
         chunk_pause_seconds = _chunk_pause_seconds(payload)
+        chain_reference, chain_reference_seconds = _chain_reference_options(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TypeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if chain_reference and len(chunks) > 1:
+        logger.info(
+            "chain_reference enabled: window=%.2fs chunks=%d",
+            chain_reference_seconds,
+            len(chunks),
+        )
 
     if stream_as_sse:
         return _stream_speech_response(
@@ -400,6 +414,8 @@ async def create_speech(payload: SpeechRequest) -> Response:
             chunks,
             response_format,
             request_started_at,
+            chain_reference=chain_reference,
+            chain_reference_seconds=chain_reference_seconds,
         )
 
     try:
@@ -413,6 +429,8 @@ async def create_speech(payload: SpeechRequest) -> Response:
             sampling_request,
             chunks,
             chunk_pause_seconds=chunk_pause_seconds,
+            chain_reference=chain_reference,
+            chain_reference_seconds=chain_reference_seconds,
         )
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -687,6 +705,68 @@ def _split_text_for_speech(
     return chunks or [text]
 
 
+def _chain_reference_options(payload: SpeechRequest) -> tuple[bool, float]:
+    enabled = bool(
+        _coalesce(
+            payload.irodori.chain_reference,
+            _extra(payload, "chain_reference"),
+            False,
+        )
+    )
+    window_seconds = _as_float(
+        _coalesce(
+            payload.irodori.chain_reference_seconds,
+            _extra(payload, "chain_reference_seconds"),
+            3.0,
+        ),
+        "chain_reference_seconds",
+    )
+    if enabled:
+        if not _SUPPORTS_REF_AUDIO:
+            raise HTTPException(
+                status_code=400,
+                detail="chain_reference requires an irodori-tts build with in-memory "
+                "reference support (SamplingRequest.ref_audio); update the "
+                "irodori-tts dependency.",
+            )
+        if window_seconds <= 0.0:
+            raise HTTPException(
+                status_code=400,
+                detail="chain_reference_seconds must be greater than 0.",
+            )
+    return enabled, window_seconds
+
+
+def _reference_tail(result: SamplingResult, window_seconds: float) -> torch.Tensor:
+    audio = _audio_as_channels_first(result.audio).detach().to("cpu", dtype=torch.float32)
+    samples = max(1, int(round(float(window_seconds) * float(result.sample_rate))))
+    # A fixed-size window keeps the reference conditioning shape constant so
+    # prewarmed/captured CUDA graphs are shared across chunks and requests.
+    return audio[:, -samples:].contiguous()
+
+
+def _chunk_request(
+    sampling_request: SamplingRequest,
+    chunk: str,
+    previous_result: SamplingResult | None,
+    *,
+    chain_reference: bool,
+    chain_reference_seconds: float,
+) -> SamplingRequest:
+    request = replace(sampling_request, text=chunk)
+    if chain_reference and previous_result is not None:
+        request = replace(
+            request,
+            ref_wav=None,
+            ref_latent=None,
+            ref_embed=None,
+            no_ref=False,
+            ref_audio=_reference_tail(previous_result, chain_reference_seconds),
+            ref_audio_sample_rate=int(previous_result.sample_rate),
+        )
+    return request
+
+
 def _chunk_pause_seconds(payload: SpeechRequest) -> float:
     value = _as_float(
         _coalesce(
@@ -709,6 +789,8 @@ async def _synthesize_chunks(
     chunks: list[str],
     *,
     chunk_pause_seconds: float = 0.0,
+    chain_reference: bool = False,
+    chain_reference_seconds: float = 3.0,
 ) -> SamplingResult:
     if len(chunks) == 1:
         return await _run_blocking(
@@ -718,14 +800,28 @@ async def _synthesize_chunks(
         )
 
     results: list[SamplingResult] = []
+    previous_result: SamplingResult | None = None
     for index, chunk in enumerate(chunks, start=1):
-        logger.info("speech chunk %d/%d started: chars=%d", index, len(chunks), len(chunk))
-        chunk_request = replace(sampling_request, text=chunk)
+        logger.info(
+            "speech chunk %d/%d started: chars=%d chained=%s",
+            index,
+            len(chunks),
+            len(chunk),
+            chain_reference and previous_result is not None,
+        )
+        chunk_request = _chunk_request(
+            sampling_request,
+            chunk,
+            previous_result,
+            chain_reference=chain_reference,
+            chain_reference_seconds=chain_reference_seconds,
+        )
         chunk_result = await _run_blocking(
             runtime.synthesize,
             chunk_request,
             log_fn=_log_runtime_message,
         )
+        previous_result = chunk_result
         logger.info(
             "speech chunk %d/%d completed: audio_seconds=%.2f",
             index,
@@ -770,19 +866,30 @@ def _stream_speech_response(
     chunks: list[str],
     response_format: str,
     request_started_at: float,
+    *,
+    chain_reference: bool = False,
+    chain_reference_seconds: float = 3.0,
 ) -> StreamingResponse:
     async def events() -> AsyncIterator[str]:
         completed = 0
+        previous_result: SamplingResult | None = None
         try:
             runtime = await _run_blocking(runtime_manager.get)
             for index, chunk in enumerate(chunks):
                 logger.info(
-                    "speech stream chunk %d/%d started: chars=%d",
+                    "speech stream chunk %d/%d started: chars=%d chained=%s",
                     index + 1,
                     len(chunks),
                     len(chunk),
+                    chain_reference and previous_result is not None,
                 )
-                chunk_request = replace(sampling_request, text=chunk)
+                chunk_request = _chunk_request(
+                    sampling_request,
+                    chunk,
+                    previous_result,
+                    chain_reference=chain_reference,
+                    chain_reference_seconds=chain_reference_seconds,
+                )
                 synthesis_semaphore = await _acquire_synthesis_slot()
                 try:
                     result = await _run_stream_blocking(
@@ -792,6 +899,7 @@ def _stream_speech_response(
                     )
                 finally:
                     _release_synthesis_slot(synthesis_semaphore)
+                previous_result = result
                 encode_started_at = time.perf_counter()
                 audio_bytes = await _run_stream_blocking(
                     encode_audio,
