@@ -117,10 +117,6 @@
     <div class="checks">
       <label><input type="checkbox" id="chunksMode"> 空行で分割して chunks として送る（明示区切り）</label>
       <label><input type="checkbox" id="autoChunk" checked> チャンク内の自動分割 (chunking_enabled)</label>
-    </div>
-    <div class="checks">
-      <label><input type="checkbox" id="chainRef"> chain_reference（前チャンク音声を参照に）</label>
-      <label>窓 秒 <input type="number" id="chainSecs" value="3.0" step="0.5" min="0.5" style="width:70px"></label>
       <label>chunk_pause 秒 <input type="number" id="chunkPause" value="0" step="0.1" min="0" style="width:70px"></label>
     </div>
     <button id="btnSpeak">合成する</button>
@@ -228,11 +224,6 @@ function buildPayload(text) {
   if ($("chunksMode").checked) {
     const parts = text.split(/\n\s*\n+/).map(part => part.trim()).filter(Boolean);
     if (parts.length > 0) irodori.chunks = parts;
-  }
-  if ($("chainRef").checked) {
-    irodori.chain_reference = true;
-    const chainSecs = parseFloat($("chainSecs").value);
-    if (!isNaN(chainSecs)) irodori.chain_reference_seconds = chainSecs;
   }
   const pause = parseFloat($("chunkPause").value);
   if (!isNaN(pause) && pause > 0) irodori.chunk_pause_seconds = pause;
