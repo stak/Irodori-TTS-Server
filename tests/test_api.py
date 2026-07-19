@@ -995,6 +995,129 @@ def test_speech_chunking_explicit_null_disables_default_first_sentence_min_chars
     assert runtime.texts == ["最初は速く、すぐ返します。次は長くて、通常のままです。"]
 
 
+def test_speech_explicit_chunks_take_precedence_over_input(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "この入力は合成されません。",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。三文目。"],
+                "chunking_enabled": False,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.texts == ["一文目。", "二文目。三文目。"]
+
+
+def test_speech_explicit_chunks_are_further_split_when_chunking_enabled(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": [
+                    "短い一文目。",
+                    "二番目のチャンクは長いので分割されます。そのはずです。ここが三分割目。",
+                ],
+                "chunking_enabled": True,
+                "chunk_min_chars": 5,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.texts == [
+        "短い一文目。",
+        "二番目のチャンクは長いので分割されます。",
+        "そのはずです。",
+        "ここが三分割目。",
+    ]
+
+
+def test_speech_explicit_chunks_never_merge_across_boundaries(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                # each entry is far below chunk_min_chars, but boundaries hold
+                "chunks": ["短い。", "これも短い。"],
+                "chunking_enabled": True,
+                "chunk_min_chars": 80,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.texts == ["短い。", "これも短い。"]
+
+
+def test_speech_explicit_chunks_rejects_seconds(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "chunks": ["一文目。", "二文目。"],
+                "seconds": 5.0,
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "seconds" in response.json()["error"]["message"]
+    assert runtime.texts == []
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [[], ["一文目。", "   "], ["一文目。", 42], "一文目。"],
+)
+def test_speech_explicit_chunks_rejects_invalid_values(monkeypatch, chunks):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {"chunks": chunks},
+        },
+    )
+
+    assert response.status_code in {400, 422}
+    assert runtime.texts == []
+
+
 def test_speech_chunking_does_not_split_at_commas(monkeypatch):
     runtime = FakeRuntime()
     monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))

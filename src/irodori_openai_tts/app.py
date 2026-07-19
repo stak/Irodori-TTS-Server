@@ -77,6 +77,7 @@ class IrodoriOptions(BaseModel):
     lora_adapter: str | None = None
     lora_hot_swap: bool | None = None
     apply_watermark: bool | None = None
+    chunks: list[str] | None = None
     chunking_enabled: bool | None = None
     chunk_min_chars: int | None = None
     first_sentence_chunk_min_chars: int | None = None
@@ -547,7 +548,43 @@ def _release_synthesis_slot(semaphore: asyncio.Semaphore) -> None:
     semaphore.release()
 
 
+def _explicit_chunk_list(payload: SpeechRequest) -> list[str] | None:
+    raw = _coalesce(payload.irodori.chunks, _extra(payload, "chunks"), None)
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or len(raw) == 0:
+        raise HTTPException(
+            status_code=400, detail="chunks must be a non-empty list of strings."
+        )
+    chunks: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="chunks entries must be non-empty strings.",
+            )
+        chunks.append(item.strip())
+    total_chars = sum(len(chunk) for chunk in chunks)
+    if total_chars > 4096:
+        raise HTTPException(
+            status_code=400,
+            detail=f"chunks total length must be at most 4096 characters (got {total_chars}).",
+        )
+    return chunks
+
+
 def _speech_chunks(payload: SpeechRequest, sampling_request: SamplingRequest) -> list[str]:
+    explicit_chunks = _explicit_chunk_list(payload)
+    if explicit_chunks is not None and sampling_request.seconds is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="chunks cannot be combined with an explicit seconds; "
+            "the fixed duration would be ambiguous across chunks.",
+        )
+    if explicit_chunks is not None:
+        logger.info("speech chunking: %d explicit chunks supplied", len(explicit_chunks))
+    base_chunks = explicit_chunks if explicit_chunks is not None else [payload.input]
+
     enabled = bool(
         _coalesce(
             payload.irodori.chunking_enabled,
@@ -557,11 +594,11 @@ def _speech_chunks(payload: SpeechRequest, sampling_request: SamplingRequest) ->
         )
     )
     if not enabled:
-        return [payload.input]
+        return base_chunks
 
     if sampling_request.seconds is not None:
         logger.info("speech chunking skipped: explicit seconds is set")
-        return [payload.input]
+        return base_chunks
 
     min_chars = _as_int(
         _coalesce(
@@ -588,11 +625,15 @@ def _speech_chunks(payload: SpeechRequest, sampling_request: SamplingRequest) ->
             detail="first_sentence_chunk_min_chars must be greater than 0.",
         )
 
-    chunks = _split_text_for_speech(
-        payload.input,
-        min_chars=min_chars,
-        first_sentence_min_chars=first_sentence_min_chars,
-    )
+    chunks: list[str] = []
+    for index, base_chunk in enumerate(base_chunks):
+        chunks.extend(
+            _split_text_for_speech(
+                base_chunk,
+                min_chars=min_chars,
+                first_sentence_min_chars=first_sentence_min_chars if index == 0 else None,
+            )
+        )
     if len(chunks) > 1:
         logger.info(
             "speech chunking enabled: chunks=%d min_chars=%d first_sentence_min_chars=%s",
