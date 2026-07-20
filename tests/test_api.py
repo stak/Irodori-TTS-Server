@@ -30,15 +30,22 @@ class FakeRuntime:
             raise self.exc
         if log_fn is not None:
             log_fn("fake synthesize")
-        audio = torch.zeros(1, max(1, len(req.text)) * 10)
+        num_candidates = max(1, int(req.num_candidates))
+        # Distinct constant value per candidate so tests can tell them apart.
+        audios = [
+            torch.full((1, max(1, len(req.text)) * 10), index * 1e-3)
+            for index in range(num_candidates)
+        ]
+        used_seed = 123 if req.seed is None else int(req.seed)
         return SamplingResult(
-            audio=audio,
-            audios=[audio],
+            audio=audios[0],
+            audios=audios,
             sample_rate=1000,
             stage_timings=[],
             total_to_decode=0.1,
-            used_seed=123,
+            used_seed=used_seed,
             messages=[],
+            used_seeds=[used_seed + index for index in range(num_candidates)],
         )
 
 
@@ -1347,6 +1354,244 @@ def test_speech_rejects_invalid_first_sentence_chunk_min_chars(monkeypatch, valu
 
     assert response.status_code == 400
     assert "first_sentence_chunk_min_chars" in response.json()["error"]["message"]
+    assert runtime.texts == []
+
+
+def test_speech_explicit_n_1_keeps_binary_response(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "response_format": "wav",
+            "n": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/wav"
+    assert response.headers["x-irodori-seed"] == "123"
+    assert response.content.startswith(b"RIFF")
+    assert runtime.requests[0].num_candidates == 1
+
+
+def test_speech_n_returns_json_candidates(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "response_format": "wav",
+            "n": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["x-irodori-seed"] == "123"
+    body = response.json()
+    assert body["object"] == "speech.candidates"
+    assert body["seed"] == 123
+    assert body["sample_rate"] == 1000
+    assert [candidate["index"] for candidate in body["candidates"]] == [0, 1, 2]
+    # Candidate i is generated from base seed + i and carries its own seed.
+    assert [candidate["seed"] for candidate in body["candidates"]] == [123, 124, 125]
+    for candidate in body["candidates"]:
+        assert candidate["format"] == "wav"
+        assert candidate["media_type"] == "audio/wav"
+        assert candidate["duration_sec"] > 0.0
+        assert base64.b64decode(candidate["audio"]).startswith(b"RIFF")
+    # FakeRuntime emits distinct samples per candidate; encoded bytes differ.
+    assert len({candidate["audio"] for candidate in body["candidates"]}) == 3
+    assert runtime.requests[0].num_candidates == 3
+    assert runtime.texts == ["こんにちは。"]
+
+
+def test_speech_n_derives_candidate_seeds_from_request_seed(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "response_format": "wav",
+            "n": 2,
+            "irodori": {"seed": 777},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["seed"] == 777
+    assert [candidate["seed"] for candidate in body["candidates"]] == [777, 778]
+    assert runtime.requests[0].seed == 777
+    assert runtime.requests[0].num_candidates == 2
+
+
+def test_speech_irodori_num_candidates_is_an_alias_for_n(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {"num_candidates": 2},
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["candidates"]) == 2
+    assert runtime.requests[0].num_candidates == 2
+
+
+def test_speech_n_takes_precedence_over_irodori_num_candidates(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "response_format": "wav",
+            "n": 3,
+            "irodori": {"num_candidates": 2},
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["candidates"]) == 3
+
+
+def test_speech_n_skips_auto_chunking(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+    text = (
+        "これは短い文です。これはまだ同じチャンクに残る文です。"
+        "ここまでで十分長くなったので分割されます。最後です。"
+    )
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": text,
+            "voice": "none",
+            "response_format": "wav",
+            "n": 2,
+            "irodori": {
+                "chunking_enabled": True,
+                "chunk_min_chars": 35,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.texts == [text]
+    assert len(response.json()["candidates"]) == 2
+
+
+@pytest.mark.parametrize("n", [0, -1])
+def test_speech_rejects_non_positive_n_before_loading_runtime(monkeypatch, n):
+    runtime = FakeRuntime()
+    manager = FakeRuntimeManager(runtime=runtime)
+    monkeypatch.setattr(main, "runtime_manager", manager)
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "n": n,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "num_candidates" in response.json()["error"]["message"]
+    assert manager.thread_ids == []
+    assert runtime.texts == []
+
+
+def test_speech_rejects_n_above_configured_maximum_before_loading_runtime(monkeypatch):
+    runtime = FakeRuntime()
+    manager = FakeRuntimeManager(runtime=runtime)
+    monkeypatch.setattr(main, "runtime_manager", manager)
+    monkeypatch.setattr(main.settings, "max_num_candidates", 4)
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "n": 5,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "at most 4" in response.json()["error"]["message"]
+    assert manager.thread_ids == []
+    assert runtime.texts == []
+
+
+def test_speech_n_rejects_sse_streaming(monkeypatch):
+    runtime = FakeRuntime()
+    manager = FakeRuntimeManager(runtime=runtime)
+    monkeypatch.setattr(main, "runtime_manager", manager)
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "n": 2,
+            "stream_format": "sse",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "stream_format" in response.json()["error"]["message"]
+    assert manager.thread_ids == []
+    assert runtime.texts == []
+
+
+def test_speech_n_rejects_explicit_chunks(monkeypatch):
+    runtime = FakeRuntime()
+    manager = FakeRuntimeManager(runtime=runtime)
+    monkeypatch.setattr(main, "runtime_manager", manager)
+
+    response = TestClient(main.app).post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "placeholder",
+            "voice": "none",
+            "n": 2,
+            "irodori": {"chunks": ["一文目。", "二文目。"]},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "chunks" in response.json()["error"]["message"]
+    assert manager.thread_ids == []
     assert runtime.texts == []
 
 

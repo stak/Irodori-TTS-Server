@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     default_tail_std_threshold: float = 0.05
     default_tail_mean_threshold: float = 0.1
     default_num_candidates: int = 1
+    max_num_candidates: int = 8
     default_decode_mode: str = "sequential"
     default_chunking_enabled: bool = True
     default_chunk_min_chars: int = 80

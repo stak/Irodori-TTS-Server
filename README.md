@@ -230,6 +230,7 @@ Request fields:
 | `voice` | string or object | no | Voice ID, or `{ "id": "voice_id" }`. Uses `IRODORI_DEFAULT_VOICE` if omitted. |
 | `response_format` | string | no | `wav`, `mp3`, `flac`, `opus`, `aac`, or `pcm`. |
 | `speed` | number | no | Speaking speed, from `0.25` to `4.0`. Higher is faster; internally this is converted to an inverse duration scale. |
+| `n` | integer | no | Number of candidates to generate in one batched sampling pass, from `1` to `IRODORI_MAX_NUM_CANDIDATES`. With `n: 1` (default) the response is unchanged audio bytes; with `n > 1` it is a JSON candidate list. See [Best-of-N candidates](#best-of-n-candidates-n--1). |
 | `stream_format` | string | no | Set to `sse` to receive chunk-level Server-Sent Events. |
 | `irodori` | object | no | Irodori-specific inference options. |
 
@@ -271,6 +272,92 @@ data: {"chunks":2}
 
 Each `audio_base64` value contains a complete audio file for that chunk, so
 clients can decode and enqueue chunks while later chunks are still generating.
+
+#### Best-of-N candidates (`n > 1`)
+
+Set `n` to generate several takes of the same input in one batched sampling
+pass and receive all of them, e.g. to pick the best take downstream with a
+speaker-similarity or quality scorer. Text encoding and reference-voice
+conditioning are computed once and shared across the batch, so this is cheaper
+than sending `n` separate requests. Candidate ranking is out of scope for the
+server; it returns every candidate and leaves selection to the client.
+
+```bash
+curl http://localhost:8088/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "irodori-tts",
+    "input": "こんにちは、今日はいい天気ですね。",
+    "voice": "sample",
+    "response_format": "wav",
+    "n": 3
+  }'
+```
+
+With `n > 1` the response is JSON instead of raw audio bytes:
+
+```json
+{
+  "object": "speech.candidates",
+  "seed": 1234,
+  "sample_rate": 44100,
+  "candidates": [
+    {"index": 0, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1234, "duration_sec": 3.2},
+    {"index": 1, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1235, "duration_sec": 3.4},
+    {"index": 2, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1236, "duration_sec": 3.1}
+  ]
+}
+```
+
+Seed semantics: candidate `i` draws its initial noise from its own generator
+seeded with `base seed + i`. The response's top-level `seed` is the base seed
+and each candidate carries its own derived `seed`. Two ways to bring a chosen
+candidate back:
+
+- **Standalone regeneration** — re-send the request with `n: 1` and
+  `irodori.seed` set to the candidate's `seed`. This draws bit-identical
+  initial noise, i.e. the same take. It is NOT bit-exact against the batched
+  output on CUDA: kernel numerics differ between batch sizes and the
+  diffusion steps amplify them chaotically. Measured on an RTX 4090 (bf16):
+  duration always identical, waveform correlation 0.88–0.99 depending on the
+  draw — treat it as "the same take, re-rendered", not as a copy. When the
+  archived bytes must match, use the bit-exact path below.
+- **Bit-exact reproduction** — re-send the identical request (same
+  `irodori.seed`, same `n`) and take the same `index`. Warm responses
+  reproduce bit-exactly; only the very first request at a new batch shape
+  (CUDA graph capture) can deviate negligibly (measured max abs sample
+  difference 1.6e-3, correlation 1.000000).
+
+Per-candidate seeds require an `irodori-tts` build with the
+per-candidate-seeds patch (candidate noise drawn per row from `seed + i`);
+with older builds all candidates share the base seed and only the bit-exact
+path applies.
+
+Restrictions with `n > 1`:
+
+- Automatic text chunking is skipped; the whole `input` is synthesized in a
+  single pass (so it is subject to `max_seconds`). Intended for short lines.
+- Explicit `irodori.chunks` and `stream_format: "sse"` are rejected with `400`.
+- `n` is capped by `IRODORI_MAX_NUM_CANDIDATES` (default `8`). All candidates
+  are sampled in one batch, so peak VRAM and per-step compute grow with `n`;
+  see the measured numbers below before raising the cap.
+
+`irodori.num_candidates` is accepted as an alias (it maps to the same runtime
+field); `n` takes precedence when both are set.
+
+Measured on an RTX 4090 (bf16 model, fp32 codec, CUDA graphs enabled, 40
+steps, ~6.5 s of 48 kHz output per candidate, warm graphs):
+
+| `n` | Latency (warm) | `n` separate warm requests | Process VRAM |
+| --- | --- | --- | --- |
+| 1 | 0.53 s | – | 8.7 GiB |
+| 2 | 0.77 s | 1.06 s | 8.7 GiB |
+| 4 | 1.21 s | 2.12 s | 8.8 GiB |
+| 8 | 2.32 s | 4.24 s | 8.8 GiB |
+
+As with any other change in tensor shapes, the first request at a new batch
+size captures CUDA graphs once (~3–4 s extra); later requests with the same
+`n` replay them.
 
 Irodori-specific options:
 
@@ -526,6 +613,8 @@ All environment variables use the `IRODORI_` prefix. Request fields override the
 | `IRODORI_DEFAULT_CHUNKING_ENABLED` | `true` | Enable punctuation-aware chunking by default. |
 | `IRODORI_DEFAULT_CHUNK_MIN_CHARS` | `80` | Minimum non-space characters before a split point is used. |
 | `IRODORI_DEFAULT_FIRST_SENTENCE_CHUNK_MIN_CHARS` | unset | Minimum non-space characters before the first sentence split point is used. Unset keeps normal `chunk_min_chars` behavior. |
+| `IRODORI_DEFAULT_NUM_CANDIDATES` | `1` | Default candidate count when the request omits `n` / `irodori.num_candidates`. |
+| `IRODORI_MAX_NUM_CANDIDATES` | `8` | Upper bound accepted for `n` / `irodori.num_candidates`. |
 | `IRODORI_DEFAULT_LORA_HOT_SWAP` | `false` | Swap LoRA adapter weights in place on adapter switches so cached CUDA graphs survive. |
 | `IRODORI_DEFAULT_APPLY_WATERMARK` | `true` | Embed the SilentCipher AI-generation watermark in generated audio. |
 
