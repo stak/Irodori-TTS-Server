@@ -4,7 +4,7 @@ OpenAI Text-to-Speech API compatible server for [Irodori-TTS](https://github.com
 
 This server targets the [Irodori-TTS 500M v3 base model](https://huggingface.co/Aratako/Irodori-TTS-500M-v3). It supports reference-audio voice cloning, OpenAI-style response formats, and automatic long text chunking.
 
-Inference runs on the [stak/Irodori-TTS performance fork](https://github.com/stak/Irodori-TTS), which adds CUDA-graph replay, graph prewarming, LoRA hot-swap, an optional watermark toggle, and other inference-speed optimizations on top of upstream Irodori-TTS. See the fork's [performance notes](https://github.com/stak/Irodori-TTS/blob/main/docs/performance.md) for details and tuning.
+Inference runs on the [stak/Irodori-TTS performance fork](https://github.com/stak/Irodori-TTS), which adds CUDA-graph replay, LoRA hot-swap, an optional watermark toggle, and other inference-speed optimizations on top of upstream Irodori-TTS. See the fork's [performance notes](https://github.com/stak/Irodori-TTS/blob/main/docs/performance.md) for details and tuning.
 
 Streaming synthesis is not implemented. Requests return one complete audio response.
 
@@ -15,8 +15,7 @@ Streaming synthesis is not implemented. Requests return one complete audio respo
 - Response formats: `wav`, `mp3`, `flac`, `opus`, `aac`, `pcm`
 - Automatic long text chunking
 - Per-request dynamic LoRA adapter loading
-- CUDA graph prewarming at startup or via `POST /v1/admin/prewarm`
-- LoRA hot-swap that keeps prewarmed CUDA graphs across adapter switches
+- LoRA hot-swap that keeps cached CUDA graphs across adapter switches
 - Optional SilentCipher watermark disable (per request or by default)
 - Optional bearer token auth
 
@@ -181,7 +180,7 @@ The SDK method name contains `streaming_response`, but this server still generat
 
 ## Test Client
 
-[examples/test-client.html](examples/test-client.html) is a self-contained browser page for exercising the API by hand: health check, voice list, synthesis with the common `irodori` options (num_steps, schedule, seed, LoRA adapter, hot-swap, watermark), `POST /v1/admin/prewarm`, and SSE streaming with a per-chunk arrival log. Generated audio plays inline and can be downloaded.
+[examples/test-client.html](examples/test-client.html) is a self-contained browser page for exercising the API by hand: health check, voice list, synthesis with the common `irodori` options (num_steps, schedule, seed, LoRA adapter, hot-swap, watermark), and SSE streaming with a per-chunk arrival log. Generated audio plays inline and can be downloaded.
 
 Open the file directly in a browser. Because it calls the API from a `file://` origin, allow it in the server configuration:
 
@@ -406,24 +405,6 @@ Dynamic LoRA loading is per runtime process. The first request for an adapter lo
 
 Switching `lora_adapter` normally drops all cached CUDA graphs (they are recaptured on the next requests). Set `lora_hot_swap: true` (or `IRODORI_DEFAULT_LORA_HOT_SWAP=true`) to swap adapter weights in place and keep the graphs; a tiny floating-point drift can accumulate per swap.
 
-### `POST /v1/admin/prewarm`
-
-Loads the model (if not loaded yet) and captures CUDA graphs so following requests take the fast replay path from the first request. Useful after startup, or to prewarm a specific LoRA adapter without restarting. Returns a summary string from the runtime.
-
-All body fields are optional; omitted values fall back to the server defaults (`IRODORI_PREWARM_MAX_SECONDS`, `IRODORI_PREWARM_LORA_ADAPTER`, `IRODORI_DEFAULT_LORA_HOT_SWAP`, `IRODORI_DEFAULT_NUM_STEPS`).
-
-```bash
-curl -X POST http://localhost:8088/v1/admin/prewarm \
-  -H "Content-Type: application/json" \
-  -d '{
-    "lora_adapter": "/models/adapters/speaker-a",
-    "lora_hot_swap": true,
-    "max_seconds": 15
-  }'
-```
-
-The request occupies a synthesis slot while running, so concurrent speech requests wait for it (or time out after `IRODORI_SYNTHESIS_WAIT_TIMEOUT`). On non-CUDA devices, or with `IRODORI_DISABLE_CUDA_GRAPH=1`, prewarming is skipped and the status message says so.
-
 ### Voice Management
 
 The server scans `IRODORI_VOICES_DIR` for voice files. File stems become voice IDs.
@@ -560,11 +541,10 @@ Inference runs on the [stak/Irodori-TTS performance fork](https://github.com/sta
 Recommended server setup on an NVIDIA GPU:
 
 1. Set `IRODORI_MODEL_PRECISION=bf16` and keep `IRODORI_CODEC_PRECISION=fp32` (the codec decoder already runs its fp16 fast path; bf16/fp16 codec precision only lowers quality). `compose.gpu.yaml` applies this pairing by default.
-2. Set `IRODORI_PREWARM=true` so the server captures CUDA graphs during startup (this implies loading the model at startup). The first real request then takes the fast path instead of paying capture cost. A 15 s prewarm takes roughly 1 minute once and holds about 1-1.5 GiB of extra VRAM.
-3. If requests use a LoRA adapter, set `IRODORI_PREWARM_LORA_ADAPTER` (or call `POST /v1/admin/prewarm` with `lora_adapter`) so the graphs are captured with that adapter loaded, and consider `IRODORI_DEFAULT_LORA_HOT_SWAP=true` so adapter switches keep the cached graphs.
-4. On Linux/WSL2 (including the Docker image), `IRODORI_COMPILE=1` additionally runs the model through `torch.compile` inside the CUDA graphs for a further speedup. The first prewarm then takes a few minutes; later restarts are faster via the on-disk compile caches. In Docker those caches are persisted in the `inductor_cache` / `triton_cache` volumes, so only the first container run pays the cold-compile cost. Leave it off on Windows-native.
+2. If requests use a LoRA adapter, consider `IRODORI_DEFAULT_LORA_HOT_SWAP=true` so adapter switches keep the cached graphs.
+3. On Linux/WSL2 (including the Docker image), `IRODORI_COMPILE=1` additionally runs the model through `torch.compile` inside the CUDA graphs for a further speedup. Run the fork's `precompile.py` once beforehand with the production shape grid so no real request pays an on-demand compile; later restarts reuse the on-disk compile caches. In Docker those caches are persisted in the `inductor_cache` / `triton_cache` volumes, so only the first container run pays the cold-compile cost. Leave it off on Windows-native.
 
-Prewarmed graphs are keyed by tensor shapes and CFG scales: the server prewarms with its default sampling settings, so requests that override `cfg_scale_text`/`cfg_scale_speaker`, use `num_candidates > 1`, or supply reference audio capture their own graphs on first use (one-time, about a second each). `num_steps`, `seed`, `t_schedule_mode`, and `sway_coeff` can vary freely without recapture.
+CUDA graphs are captured lazily and keyed by tensor shapes and CFG scales: the first request at a new shape (length bucket, candidate count, CFG scales, reference conditioning) pays a one-time capture cost of about a second, and every following request with that shape replays the graph. `num_steps`, `seed`, `t_schedule_mode`, and `sway_coeff` can vary freely without recapture.
 
 The performance-fork environment variables (`IRODORI_DISABLE_TF32`, `IRODORI_TEXT_BUCKETS`, ...) are read by the `irodori-tts` library directly from the process environment. The server exports `.env` to the environment at startup, so they can be configured in the same `.env` file; they are also listed in `.env.example`, `compose.gpu.yaml`, and `compose.rocm.yaml` with their defaults.
 
@@ -591,9 +571,6 @@ All environment variables use the `IRODORI_` prefix. Request fields override the
 | `IRODORI_COMPILE_MODEL` | `false` | Enable `torch.compile` for core inference methods. Keep disabled when using dynamic LoRA adapters. |
 | `IRODORI_COMPILE_DYNAMIC` | `false` | Use `dynamic=True` for `torch.compile`. |
 | `IRODORI_PRELOAD` | `false` | Load the model during startup. |
-| `IRODORI_PREWARM` | `false` | Capture CUDA graphs during startup so the first request is already fast. Implies loading the model at startup. CUDA only; a no-op elsewhere. |
-| `IRODORI_PREWARM_MAX_SECONDS` | `15` | Upper bound of the audio duration range covered by prewarmed graphs. |
-| `IRODORI_PREWARM_LORA_ADAPTER` | unset | LoRA adapter directory loaded before prewarming so its requests take the fast path immediately. |
 | `IRODORI_MODEL_LOAD_TIMEOUT` | `300` | Seconds to wait for model loading. |
 | `IRODORI_MAX_CONCURRENT_SYNTHESIS` | `1` | Maximum simultaneous synthesis jobs. |
 | `IRODORI_SYNTHESIS_WAIT_TIMEOUT` | `300` | Seconds to wait for a synthesis slot. |

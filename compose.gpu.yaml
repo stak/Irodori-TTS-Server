@@ -12,12 +12,8 @@ services:
       # precision, and bf16/fp16 codec precision only lowers quality.
       IRODORI_MODEL_PRECISION: ${IRODORI_MODEL_PRECISION:-bf16}
       IRODORI_CODEC_PRECISION: ${IRODORI_CODEC_PRECISION:-fp32}
-      # Load the model and capture CUDA graphs at startup so the first
-      # request is already fast.
+      # Load the model at startup so the first request does not pay for it.
       IRODORI_PRELOAD: ${IRODORI_PRELOAD:-true}
-      IRODORI_PREWARM: ${IRODORI_PREWARM:-true}
-      IRODORI_PREWARM_MAX_SECONDS: ${IRODORI_PREWARM_MAX_SECONDS:-15}
-      IRODORI_PREWARM_LORA_ADAPTER: ${IRODORI_PREWARM_LORA_ADAPTER:-}
       # Irodori-TTS performance fork toggles (defaults shown; see
       # https://github.com/stak/Irodori-TTS/blob/main/docs/performance.md).
       IRODORI_DISABLE_TF32: ${IRODORI_DISABLE_TF32:-0}
@@ -27,7 +23,7 @@ services:
       IRODORI_DISABLE_FP16_DECODE: ${IRODORI_DISABLE_FP16_DECODE:-0}
       IRODORI_TEXT_BUCKETS: ${IRODORI_TEXT_BUCKETS:-64}
       # 1 enables torch.compile inside the CUDA step graphs (Linux containers
-      # have the required Triton toolchain; a cold prewarm takes minutes).
+      # have the required Triton toolchain; a cold compile takes minutes).
       IRODORI_COMPILE: ${IRODORI_COMPILE:-0}
       IRODORI_CUDA_GRAPH_BUCKET: ${IRODORI_CUDA_GRAPH_BUCKET:-16}
       IRODORI_CUDA_GRAPH_CACHE: ${IRODORI_CUDA_GRAPH_CACHE:-64}

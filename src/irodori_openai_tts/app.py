@@ -97,13 +97,6 @@ class SpeechRequest(BaseModel):
     irodori: IrodoriOptions = Field(default_factory=IrodoriOptions)
 
 
-class PrewarmRequest(BaseModel):
-    lora_adapter: str | None = None
-    lora_hot_swap: bool | None = None
-    max_seconds: float | None = Field(default=None, gt=0.0)
-    num_steps: int | None = Field(default=None, ge=1)
-
-
 settings = get_settings()
 runtime_manager = RuntimeManager(settings)
 voice_registry = VoiceRegistry(settings)
@@ -112,18 +105,11 @@ voice_registry = VoiceRegistry(settings)
 def startup() -> None:
     voices_dir = voice_registry.ensure_dir()
     logger.info("voices directory: %s", voices_dir)
-    if settings.preload or settings.prewarm:
+    if settings.preload:
         logger.info("preload enabled; loading runtime during startup")
         runtime_manager.get()
     else:
         logger.info("preload disabled; runtime will load on first speech request")
-    if settings.prewarm:
-        logger.info(
-            "prewarm enabled; capturing CUDA graphs during startup (max_seconds=%.1f)",
-            settings.prewarm_max_seconds,
-        )
-        status = runtime_manager.prewarm()
-        logger.info("prewarm finished: %s", status)
 
 
 @asynccontextmanager
@@ -201,10 +187,6 @@ def health() -> dict[str, Any]:
         },
         "runtime": {
             "preload": settings.preload,
-            "prewarm": settings.prewarm,
-            "prewarm_max_seconds": settings.prewarm_max_seconds,
-            "prewarm_lora_adapter": settings.prewarm_lora_adapter,
-            "prewarm_status": runtime_manager.prewarm_status,
             "loaded": runtime_manager.is_loaded,
             "loading": runtime_manager.is_loading,
             "checkpoint": runtime_manager.checkpoint_path,
@@ -245,31 +227,6 @@ def list_models() -> dict[str, Any]:
             }
         ],
     }
-
-
-@app.post("/v1/admin/prewarm", dependencies=[Depends(require_auth)])
-async def prewarm(payload: PrewarmRequest | None = None) -> dict[str, Any]:
-    """
-    Load the runtime (if needed) and capture CUDA graphs so following
-    requests take the fast replay path. Optionally targets a LoRA adapter.
-    """
-    body = payload or PrewarmRequest()
-    synthesis_semaphore = await _acquire_synthesis_slot()
-    try:
-        status = await _run_blocking(
-            runtime_manager.prewarm,
-            lora_adapter=body.lora_adapter,
-            lora_hot_swap=body.lora_hot_swap,
-            max_seconds=body.max_seconds,
-            num_steps=body.num_steps,
-        )
-    except RuntimeLoadTimeoutError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (FileNotFoundError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        _release_synthesis_slot(synthesis_semaphore)
-    return {"object": "prewarm", "status": status}
 
 
 @app.get("/v1/audio/voices", dependencies=[Depends(require_auth)])

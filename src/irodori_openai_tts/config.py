@@ -40,9 +40,6 @@ class Settings(BaseSettings):
     compile_model: bool = False
     compile_dynamic: bool = False
     preload: bool = False
-    prewarm: bool = False
-    prewarm_max_seconds: float = 15.0
-    prewarm_lora_adapter: str | None = None
     model_load_timeout: float = 300.0
     max_concurrent_synthesis: int = 1
     synthesis_wait_timeout: float = 300.0
