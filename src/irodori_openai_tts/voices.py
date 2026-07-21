@@ -25,12 +25,24 @@ VOICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 @dataclass(frozen=True)
+class RefEmbedBlendSource:
+    """One resolved component of a runtime Speaker Inversion blend."""
+
+    voice_id: str
+    path: str
+    weight: float
+
+
+@dataclass(frozen=True)
 class VoiceSpec:
     voice_id: str
     ref_wav: str | None = None
     ref_latent: str | None = None
     ref_embed: str | None = None
     no_ref: bool = False
+    # Runtime Speaker Inversion blend: resolved (voice, path, weight) sources.
+    # Mutually exclusive with the other reference fields.
+    ref_embed_blend: tuple[RefEmbedBlendSource, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +102,21 @@ class VoiceRegistry:
             f"Unknown voice={voice_id!r}. Put a reference audio file in "
             f"{self.settings.voices_dir}, add an alias file, or use voice='none'."
         )
+
+    def resolve_speaker_embed_path(self, voice_id: str) -> str:
+        """Resolve a voice id to its Speaker Inversion file for blending.
+
+        Blend components are referenced by registered voice id only (never by
+        raw path), so every source stays inside the managed voices directory
+        or the alias file.
+        """
+        spec = self.resolve(voice_id)
+        if spec.ref_embed is None:
+            raise KeyError(
+                f"voice={voice_id!r} is not a Speaker Inversion voice. Blend components "
+                f"must resolve to a {SPEAKER_INVERSION_SUFFIX!r} file."
+            )
+        return spec.ref_embed
 
     def list_files(self) -> list[VoiceFile]:
         root = self.ensure_dir()

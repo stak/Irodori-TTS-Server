@@ -142,3 +142,18 @@ def test_write_file_rejects_bad_voice_id_extension_and_empty_data(tmp_path):
         registry.write_file(filename="speaker.txt", data=b"text")
     with pytest.raises(ValueError, match="must not be empty"):
         registry.write_file(filename="speaker.wav", data=b"")
+
+
+def test_resolve_speaker_embed_path(tmp_path):
+    embed_path = tmp_path / "alice.speaker.safetensors"
+    embed_path.write_bytes(b"embed")
+    (tmp_path / "bob.wav").write_bytes(b"wav")
+    registry = make_registry(tmp_path)
+
+    assert registry.resolve_speaker_embed_path("alice") == str(embed_path)
+    with pytest.raises(KeyError, match="not a Speaker Inversion voice"):
+        registry.resolve_speaker_embed_path("bob")
+    with pytest.raises(KeyError, match="not a Speaker Inversion voice"):
+        registry.resolve_speaker_embed_path("none")
+    with pytest.raises(KeyError, match="Unknown voice"):
+        registry.resolve_speaker_embed_path("ghost")
