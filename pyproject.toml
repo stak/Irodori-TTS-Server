@@ -8,7 +8,7 @@ requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115.0",
     "huggingface-hub>=0.34.0,<1.0",
-    "irodori-tts @ git+https://github.com/stak/Irodori-TTS.git@c55f9f8c35aa6c4ce51b99a5ee9f22de2d53d5e1",
+    "irodori-tts @ git+https://github.com/stak/Irodori-TTS.git",
     "pydantic-settings>=2.6.0",
     "python-dotenv>=1.0.1",
     "python-multipart>=0.0.9",

@@ -1801,7 +1801,7 @@ wheels = [
 [[package]]
 name = "irodori-tts"
 version = "0.1.0"
-source = { git = "https://github.com/stak/Irodori-TTS.git?rev=c55f9f8c35aa6c4ce51b99a5ee9f22de2d53d5e1#c55f9f8c35aa6c4ce51b99a5ee9f22de2d53d5e1" }
+source = { git = "https://github.com/stak/Irodori-TTS.git#b3e3c9c226bff305351203cb8ffde9c1b80fc50d" }
 dependencies = [
     { name = "dacvae" },
     { name = "datasets" },
@@ -1884,7 +1884,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.0" },
     { name = "huggingface-hub", specifier = ">=0.34.0,<1.0" },
-    { name = "irodori-tts", git = "https://github.com/stak/Irodori-TTS.git?rev=c55f9f8c35aa6c4ce51b99a5ee9f22de2d53d5e1" },
+    { name = "irodori-tts", git = "https://github.com/stak/Irodori-TTS.git" },
     { name = "pydantic-settings", specifier = ">=2.6.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
