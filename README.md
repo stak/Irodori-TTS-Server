@@ -536,7 +536,7 @@ If the model is still loading or no synthesis slot becomes available before the 
 
 ## Performance
 
-Inference runs on the [stak/Irodori-TTS performance fork](https://github.com/stak/Irodori-TTS). Most optimizations (TF32 matmul, CUDA graph replay, fp16 codec decode, text-length bucketing, request-time LoRA merge) are enabled by default on CUDA and fall back to upstream behavior on other devices. Full details, measurements, and opt-outs are in the fork's [docs/performance.md](https://github.com/stak/Irodori-TTS/blob/main/docs/performance.md).
+Inference runs on the [stak/Irodori-TTS performance fork](https://github.com/stak/Irodori-TTS). The fork's optimizations (TF32 matmul, CUDA graph replay, fp16 codec decode, text-length bucketing, request-time LoRA merge) are grouped behind the library's `IRODORI_PERF_PROFILE`: the library default is `upstream` (bit-identical to unmodified Irodori-TTS), while **the server exports `recommended` by default** (`IRODORI_RUNTIME_PROFILE`) because serving fast is its purpose. Set `IRODORI_RUNTIME_PROFILE=upstream` — or set `IRODORI_PERF_PROFILE` yourself, which always wins — to serve upstream-identical outputs. Individual `IRODORI_DISABLE_*` variables still override either profile. Full details, measurements, and the recommended configurations table are in the fork's [docs/performance.md](https://github.com/stak/Irodori-TTS/blob/main/docs/performance.md).
 
 Recommended server setup on an NVIDIA GPU:
 
@@ -571,6 +571,7 @@ All environment variables use the `IRODORI_` prefix. Request fields override the
 | `IRODORI_COMPILE_MODEL` | `false` | Enable `torch.compile` for core inference methods. Keep disabled when using dynamic LoRA adapters. |
 | `IRODORI_COMPILE_DYNAMIC` | `false` | Use `dynamic=True` for `torch.compile`. |
 | `IRODORI_PRELOAD` | `false` | Load the model during startup. |
+| `IRODORI_RUNTIME_PROFILE` | `recommended` | Exported to the irodori-tts library as `IRODORI_PERF_PROFILE` at startup (an already-set `IRODORI_PERF_PROFILE` wins). `upstream` serves bit-identical unmodified-Irodori-TTS outputs. |
 | `IRODORI_MODEL_LOAD_TIMEOUT` | `300` | Seconds to wait for model loading. |
 | `IRODORI_MAX_CONCURRENT_SYNTHESIS` | `1` | Maximum simultaneous synthesis jobs. |
 | `IRODORI_SYNTHESIS_WAIT_TIMEOUT` | `300` | Seconds to wait for a synthesis slot. |

@@ -7,7 +7,9 @@ from irodori_openai_tts import app as main
 
 @pytest.fixture(autouse=True)
 def restore_app_globals(monkeypatch, tmp_path):
+    monkeypatch.delenv("IRODORI_PERF_PROFILE", raising=False)
     monkeypatch.setattr(main.settings, "api_key", None)
+    monkeypatch.setattr(main.settings, "runtime_profile", "recommended")
     monkeypatch.setattr(main.settings, "voices_dir", tmp_path)
     monkeypatch.setattr(main.settings, "voice_aliases_file", None)
     monkeypatch.setattr(main.settings, "default_voice", None)

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -102,7 +103,28 @@ runtime_manager = RuntimeManager(settings)
 voice_registry = VoiceRegistry(settings)
 
 
+def _apply_runtime_profile() -> str:
+    """
+    Export the configured runtime profile for the irodori-tts library, which
+    reads IRODORI_PERF_PROFILE from the process environment. An explicitly
+    set IRODORI_PERF_PROFILE always wins over the server setting.
+    """
+    profile = os.environ.get("IRODORI_PERF_PROFILE", "").strip()
+    if profile == "":
+        profile = str(settings.runtime_profile).strip()
+        os.environ["IRODORI_PERF_PROFILE"] = profile
+    return profile
+
+
+def _effective_runtime_profile() -> str:
+    return os.environ.get("IRODORI_PERF_PROFILE", "").strip() or str(
+        settings.runtime_profile
+    )
+
+
 def startup() -> None:
+    profile = _apply_runtime_profile()
+    logger.info("runtime performance profile: %s", profile)
     voices_dir = voice_registry.ensure_dir()
     logger.info("voices directory: %s", voices_dir)
     if settings.preload:
@@ -187,6 +209,7 @@ def health() -> dict[str, Any]:
         },
         "runtime": {
             "preload": settings.preload,
+            "perf_profile": _effective_runtime_profile(),
             "loaded": runtime_manager.is_loaded,
             "loading": runtime_manager.is_loading,
             "checkpoint": runtime_manager.checkpoint_path,

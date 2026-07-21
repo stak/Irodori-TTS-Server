@@ -124,6 +124,36 @@ def test_startup_does_not_load_model_by_default(monkeypatch):
     assert manager.thread_ids == []
 
 
+def test_startup_exports_runtime_profile(monkeypatch):
+    manager = FakeRuntimeManager(runtime=FakeRuntime())
+    monkeypatch.setattr(main, "runtime_manager", manager)
+    monkeypatch.delenv("IRODORI_PERF_PROFILE", raising=False)
+
+    main.startup()
+
+    assert main.os.environ["IRODORI_PERF_PROFILE"] == "recommended"
+
+
+def test_startup_respects_explicit_perf_profile(monkeypatch):
+    manager = FakeRuntimeManager(runtime=FakeRuntime())
+    monkeypatch.setattr(main, "runtime_manager", manager)
+    monkeypatch.setenv("IRODORI_PERF_PROFILE", "upstream")
+
+    main.startup()
+
+    assert main.os.environ["IRODORI_PERF_PROFILE"] == "upstream"
+
+
+def test_health_reports_effective_perf_profile(monkeypatch):
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager())
+    monkeypatch.setenv("IRODORI_PERF_PROFILE", "upstream")
+
+    response = TestClient(main.app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["runtime"]["perf_profile"] == "upstream"
+
+
 def test_startup_preloads_when_enabled(monkeypatch):
     manager = FakeRuntimeManager(runtime=FakeRuntime())
     monkeypatch.setattr(main, "runtime_manager", manager)
