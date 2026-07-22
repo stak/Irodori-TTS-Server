@@ -13,6 +13,11 @@ from irodori_openai_tts import app as main
 from irodori_openai_tts.runtime import RuntimeLoadTimeoutError
 from irodori_openai_tts.voices import VoiceRegistry
 from irodori_tts.inference_runtime import SamplingResult
+from irodori_tts.speaker_inversion import (
+    SPEAKER_EMBEDDING_KEY,
+    blend_speaker_embeddings,
+    save_speaker_inversion_safetensors,
+)
 
 
 class FakeRuntime:
@@ -529,6 +534,253 @@ def test_speech_uses_uploaded_voice_and_returns_headers(tmp_path, monkeypatch):
     assert float(response.headers["x-irodori-encode-seconds"]) >= 0.0
     assert response.content.startswith(b"RIFF")
     assert runtime.texts == ["こんにちは。"]
+
+
+def _write_speaker_embed(tmp_path, voice_id: str, tensor: torch.Tensor) -> torch.Tensor:
+    save_speaker_inversion_safetensors(
+        tmp_path / f"{voice_id}.speaker.safetensors",
+        {SPEAKER_EMBEDDING_KEY: tensor},
+    )
+    return tensor
+
+
+def _blend_client(tmp_path, monkeypatch) -> tuple[TestClient, FakeRuntime]:
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=runtime))
+    monkeypatch.setattr(main, "voice_registry", VoiceRegistry(main.settings))
+    return TestClient(main.app), runtime
+
+
+def test_speech_blends_ref_embeds_with_lerp_by_default(tmp_path, monkeypatch):
+    alice = _write_speaker_embed(tmp_path, "alice", torch.full((4, 8), 1.0))
+    bob = _write_speaker_embed(tmp_path, "bob", torch.full((4, 8), 3.0))
+    client, runtime = _blend_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "irodori": {
+                "ref_embeds": [
+                    {"voice": "alice", "weight": 0.7},
+                    {"voice": "bob", "weight": 0.3},
+                ]
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    request = runtime.requests[0]
+    assert request.ref_embed is None
+    assert request.ref_wav is None
+    expected = blend_speaker_embeddings([alice, bob], [0.7, 0.3], mode="lerp")
+    assert torch.equal(request.ref_speaker_embedding, expected)
+
+
+def test_speech_ref_embeds_accepted_as_top_level_extra(tmp_path, monkeypatch):
+    alice = _write_speaker_embed(tmp_path, "alice", torch.full((4, 8), 1.0))
+    bob = _write_speaker_embed(tmp_path, "bob", torch.full((4, 8), 3.0))
+    client, runtime = _blend_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "ref_embeds": [
+                {"voice": "alice", "weight": 1.0},
+                {"voice": "bob", "weight": 3.0},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    expected = blend_speaker_embeddings([alice, bob], [1.0, 3.0], mode="lerp")
+    assert torch.equal(runtime.requests[0].ref_speaker_embedding, expected)
+
+
+def test_speech_ref_embeds_drops_zero_weight_components(tmp_path, monkeypatch):
+    _write_speaker_embed(tmp_path, "alice", torch.full((4, 8), 1.0))
+    bob = _write_speaker_embed(tmp_path, "bob", torch.full((4, 8), 3.0))
+    client, runtime = _blend_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "irodori": {
+                "ref_embeds": [
+                    {"voice": "alice", "weight": 0.0},
+                    {"voice": "bob", "weight": 0.4},
+                ]
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    # A single active component normalizes to weight 1.0 == bob's embedding.
+    assert torch.equal(runtime.requests[0].ref_speaker_embedding, bob)
+
+
+def test_speech_ref_embeds_concat_mode_concatenates_tokens(tmp_path, monkeypatch):
+    alice = _write_speaker_embed(tmp_path, "alice", torch.full((4, 8), 1.0))
+    bob = _write_speaker_embed(tmp_path, "bob", torch.full((2, 8), 3.0))
+    client, runtime = _blend_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "irodori": {
+                "ref_embeds": [
+                    {"voice": "alice", "weight": 0.5},
+                    {"voice": "bob", "weight": 0.5},
+                ],
+                "si_blend_mode": "concat",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    expected = blend_speaker_embeddings([alice, bob], [0.5, 0.5], mode="concat")
+    assert runtime.requests[0].ref_speaker_embedding.shape == (6, 8)
+    assert torch.equal(runtime.requests[0].ref_speaker_embedding, expected)
+
+
+def test_speech_ref_embeds_rejects_all_zero_weights(tmp_path, monkeypatch):
+    _write_speaker_embed(tmp_path, "alice", torch.full((4, 8), 1.0))
+    client, _runtime = _blend_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "irodori": {"ref_embeds": [{"voice": "alice", "weight": 0.0}]},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "weight > 0" in response.json()["error"]["message"]
+
+
+def test_speech_ref_embeds_rejects_non_speaker_inversion_voice(tmp_path, monkeypatch):
+    (tmp_path / "wavvoice.wav").write_bytes(b"fake")
+    _write_speaker_embed(tmp_path, "alice", torch.full((4, 8), 1.0))
+    client, _runtime = _blend_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "irodori": {
+                "ref_embeds": [
+                    {"voice": "alice", "weight": 0.5},
+                    {"voice": "wavvoice", "weight": 0.5},
+                ]
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "not a Speaker Inversion voice" in response.json()["error"]["message"]
+
+
+def test_speech_ref_embeds_rejects_unknown_voice(tmp_path, monkeypatch):
+    client, _runtime = _blend_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "irodori": {"ref_embeds": [{"voice": "ghost", "weight": 1.0}]},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "ghost" in response.json()["error"]["message"]
+
+
+def test_speech_ref_embeds_rejects_raw_path_component(tmp_path, monkeypatch):
+    client, _runtime = _blend_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "ref_embeds": [{"path": "C:/anywhere/x.speaker.safetensors", "weight": 1.0}],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "ref_embeds" in response.json()["error"]["message"]
+
+
+def test_speech_ref_embeds_rejects_combination_with_other_refs(tmp_path, monkeypatch):
+    _write_speaker_embed(tmp_path, "alice", torch.full((4, 8), 1.0))
+    client, _runtime = _blend_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "irodori": {
+                "ref_embeds": [{"voice": "alice", "weight": 1.0}],
+                "no_ref": True,
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "cannot be combined" in response.json()["error"]["message"]
+
+
+def test_speech_ref_embeds_lerp_rejects_token_count_mismatch(tmp_path, monkeypatch):
+    _write_speaker_embed(tmp_path, "alice", torch.full((4, 8), 1.0))
+    _write_speaker_embed(tmp_path, "short", torch.full((2, 8), 3.0))
+    client, _runtime = _blend_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "irodori": {
+                "ref_embeds": [
+                    {"voice": "alice", "weight": 0.5},
+                    {"voice": "short", "weight": 0.5},
+                ]
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "token counts" in response.json()["error"]["message"]
+
+
+def test_speech_ref_embeds_rejects_unknown_blend_mode(tmp_path, monkeypatch):
+    _write_speaker_embed(tmp_path, "alice", torch.full((4, 8), 1.0))
+    client, _runtime = _blend_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "ref_embeds": [{"voice": "alice", "weight": 1.0}],
+            "si_blend_mode": "slerp",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "si_blend_mode" in response.json()["error"]["message"]
 
 
 def test_speech_passes_lora_adapter_option(monkeypatch):

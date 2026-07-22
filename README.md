@@ -447,6 +447,35 @@ You can also create `voices/voices.json`:
 
 Text-only inference is available with `voice: "none"` when `IRODORI_ALLOW_NO_REF_VOICE=true`.
 
+#### Speaker Inversion Blending
+
+Two or more Speaker Inversion voices can be blended at request time with
+`irodori.ref_embeds`, so mix ratios can be auditioned freely without baking
+intermediate files:
+
+```json
+{
+  "model": "irodori-tts",
+  "input": "こんにちは",
+  "irodori": {
+    "ref_embeds": [
+      {"voice": "alice", "weight": 0.7},
+      {"voice": "bob", "weight": 0.3}
+    ]
+  }
+}
+```
+
+Components reference registered voice IDs that resolve to `.speaker.safetensors`
+files (raw paths are not accepted); weights are normalized to sum to 1, and
+`weight: 0` components are ignored. `ref_embeds` cannot be combined with
+`ref_wav`/`ref_latent`/`ref_embed`/`no_ref`. The optional `irodori.si_blend_mode`
+selects the blend algorithm: `lerp` (default, weighted mean; requires equal token
+counts and preserves conditioning shapes, so cached CUDA graphs are reused across
+ratio changes) or `concat` (experimental token concatenation). The blend is
+deterministic: given the same weights it is bit-identical to pre-baking the file
+with Irodori-TTS's `blend_speaker_embeddings.py` and passing it as a voice.
+
 Voice file endpoints:
 
 | Method | Path | Notes |

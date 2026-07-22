@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from functools import partial
+from pathlib import Path
 from typing import Any, Literal
 
 import torch
@@ -17,14 +18,20 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from irodori_tts.inference_runtime import SamplingRequest, SamplingResult
+from irodori_tts.speaker_inversion import (
+    SPEAKER_EMBEDDING_KEY,
+    SPEAKER_INVERSION_BLEND_MODES,
+    blend_speaker_embeddings,
+    load_speaker_inversion_payload,
+)
 
 from .audio import CONTENT_TYPES, encode_audio, normalize_response_format
 from .config import get_settings
 from .runtime import RuntimeLoadTimeoutError, RuntimeManager
-from .voices import VoiceRegistry, VoiceSpec
+from .voices import RefEmbedBlendSource, VoiceRegistry, VoiceSpec
 
 logger = logging.getLogger(__name__)
 # Sentence-ending punctuation and line breaks only: splitting mid-sentence at
@@ -34,6 +41,17 @@ _synthesis_semaphore: asyncio.Semaphore | None = None
 _synthesis_semaphore_limit: int | None = None
 
 
+class RefEmbedBlendComponent(BaseModel):
+    # extra="forbid" so unsupported keys (e.g. a raw "path") fail loudly:
+    # blend components are referenced by registered voice id only.
+    model_config = ConfigDict(extra="forbid")
+
+    voice: str = Field(min_length=1)
+    # weight=0 components are dropped instead of rejected so ratio-slider
+    # clients can send the full component list at the slider ends.
+    weight: float = Field(ge=0.0)
+
+
 class IrodoriOptions(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -41,6 +59,8 @@ class IrodoriOptions(BaseModel):
     ref_wav: str | None = None
     ref_latent: str | None = None
     ref_embed: str | None = None
+    ref_embeds: list[RefEmbedBlendComponent] | None = None
+    si_blend_mode: Literal["lerp", "concat"] | None = None
     no_ref: bool | None = None
     seconds: float | None = None
     duration_scale: float | None = None
@@ -577,6 +597,23 @@ def _resolve_voice(payload: SpeechRequest) -> VoiceSpec:
         explicit_ref_embed = _extra(payload, "ref_embed")
     if explicit_no_ref is None:
         explicit_no_ref = _extra(payload, "no_ref")
+    ref_embed_blend = _resolve_ref_embed_blend(payload)
+
+    if ref_embed_blend is not None:
+        if (
+            explicit_ref_wav is not None
+            or explicit_ref_latent is not None
+            or explicit_ref_embed is not None
+            or explicit_no_ref
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "ref_embeds cannot be combined with ref_wav/ref_latent/ref_embed/no_ref. "
+                    "Use exactly one speaker conditioning source."
+                ),
+            )
+        return VoiceSpec(voice_id="blend", ref_embed_blend=ref_embed_blend)
 
     if (
         explicit_ref_wav is not None
@@ -595,6 +632,49 @@ def _resolve_voice(payload: SpeechRequest) -> VoiceSpec:
         return voice_registry.resolve(payload.voice)
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _resolve_ref_embed_blend(payload: SpeechRequest) -> tuple[RefEmbedBlendSource, ...] | None:
+    components = payload.irodori.ref_embeds
+    if components is None:
+        raw = _extra(payload, "ref_embeds")
+        if raw is None:
+            return None
+        if not isinstance(raw, list):
+            raise HTTPException(
+                status_code=400,
+                detail="ref_embeds must be a list of {voice, weight} objects.",
+            )
+        try:
+            components = [RefEmbedBlendComponent.model_validate(item) for item in raw]
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid ref_embeds: {exc}") from exc
+
+    if not components:
+        raise HTTPException(
+            status_code=400,
+            detail="ref_embeds must contain at least one component.",
+        )
+    active = [component for component in components if component.weight > 0.0]
+    if not active:
+        raise HTTPException(
+            status_code=400,
+            detail="ref_embeds must contain at least one component with weight > 0.",
+        )
+    sources = []
+    for component in active:
+        try:
+            path = voice_registry.resolve_speaker_embed_path(component.voice)
+        except KeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        sources.append(
+            RefEmbedBlendSource(
+                voice_id=component.voice,
+                path=path,
+                weight=float(component.weight),
+            )
+        )
+    return tuple(sources)
 
 
 def _audio_duration_seconds(audio: Any, sample_rate: int) -> float:
@@ -994,8 +1074,46 @@ def _audio_as_channels_first(audio: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _blend_ref_embeds(
+    sources: tuple[RefEmbedBlendSource, ...],
+    mode: str,
+) -> torch.Tensor:
+    embeddings = []
+    for source in sources:
+        path = Path(source.path).expanduser()
+        if not path.is_file():
+            raise ValueError(
+                f"Speaker Inversion file for voice={source.voice_id!r} not found: {path}"
+            )
+        embeddings.append(load_speaker_inversion_payload(path)[SPEAKER_EMBEDDING_KEY])
+    blended = blend_speaker_embeddings(
+        embeddings,
+        [source.weight for source in sources],
+        mode=mode,
+    )
+    total = sum(source.weight for source in sources)
+    logger.info(
+        "speaker inversion blend: %s mode=%s tokens=%d",
+        " + ".join(f"{source.voice_id}*{source.weight / total:.4f}" for source in sources),
+        mode,
+        int(blended.shape[0]),
+    )
+    return blended
+
+
 def _build_sampling_request(payload: SpeechRequest, voice: VoiceSpec) -> SamplingRequest:
     opts = payload.irodori
+
+    ref_speaker_embedding = None
+    if voice.ref_embed_blend:
+        blend_mode = str(
+            _coalesce(opts.si_blend_mode, _extra(payload, "si_blend_mode"), "lerp")
+        )
+        if blend_mode not in SPEAKER_INVERSION_BLEND_MODES:
+            raise ValueError(
+                f"si_blend_mode must be one of: {', '.join(SPEAKER_INVERSION_BLEND_MODES)}."
+            )
+        ref_speaker_embedding = _blend_ref_embeds(voice.ref_embed_blend, blend_mode)
 
     duration_scale = _as_float(
         _coalesce(
@@ -1021,6 +1139,7 @@ def _build_sampling_request(payload: SpeechRequest, voice: VoiceSpec) -> Samplin
         ref_wav=voice.ref_wav,
         ref_latent=voice.ref_latent,
         ref_embed=voice.ref_embed,
+        ref_speaker_embedding=ref_speaker_embedding,
         no_ref=bool(voice.no_ref),
         ref_normalize_db=_as_optional_float(
             _explicit_option(
