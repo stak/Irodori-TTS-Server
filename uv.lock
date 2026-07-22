@@ -1801,7 +1801,7 @@ wheels = [
 [[package]]
 name = "irodori-tts"
 version = "0.1.0"
-source = { git = "https://github.com/stak/Irodori-TTS.git#b3e3c9c226bff305351203cb8ffde9c1b80fc50d" }
+source = { git = "https://github.com/stak/Irodori-TTS.git#0befe8fd05883ef6e51b17ee29b92a26e7db65b2" }
 dependencies = [
     { name = "dacvae" },
     { name = "datasets" },

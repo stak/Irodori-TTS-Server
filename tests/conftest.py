@@ -7,7 +7,9 @@ from irodori_openai_tts import app as main
 
 @pytest.fixture(autouse=True)
 def restore_app_globals(monkeypatch, tmp_path):
+    monkeypatch.delenv("IRODORI_PERF_PROFILE", raising=False)
     monkeypatch.setattr(main.settings, "api_key", None)
+    monkeypatch.setattr(main.settings, "runtime_profile", "recommended")
     monkeypatch.setattr(main.settings, "voices_dir", tmp_path)
     monkeypatch.setattr(main.settings, "voice_aliases_file", None)
     monkeypatch.setattr(main.settings, "default_voice", None)
@@ -22,9 +24,6 @@ def restore_app_globals(monkeypatch, tmp_path):
     monkeypatch.setattr(main.settings, "mp3_bitrate_mode", "VARIABLE")
     monkeypatch.setattr(main.settings, "mp3_compression_level", 0.0)
     monkeypatch.setattr(main.settings, "preload", False)
-    monkeypatch.setattr(main.settings, "prewarm", False)
-    monkeypatch.setattr(main.settings, "prewarm_max_seconds", 15.0)
-    monkeypatch.setattr(main.settings, "prewarm_lora_adapter", None)
     monkeypatch.setattr(main.settings, "max_concurrent_synthesis", 1)
     monkeypatch.setattr(main.settings, "synthesis_wait_timeout", 300.0)
     monkeypatch.setattr(main, "_synthesis_semaphore", None)

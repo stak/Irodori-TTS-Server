@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     codec_repo: str = "Aratako/Semantic-DACVAE-Japanese-32dim"
     model_name: str = "irodori-tts"
 
+    # Exported as IRODORI_PERF_PROFILE for the irodori-tts library at startup
+    # (unless IRODORI_PERF_PROFILE is already set in the environment). The
+    # library default is "upstream"; the server defaults to the fork's tuned
+    # "recommended" profile because serving is its whole purpose.
+    runtime_profile: str = "recommended"
+
     model_device: str = "auto"
     codec_device: str = "auto"
     model_precision: str = "fp32"
@@ -40,9 +46,6 @@ class Settings(BaseSettings):
     compile_model: bool = False
     compile_dynamic: bool = False
     preload: bool = False
-    prewarm: bool = False
-    prewarm_max_seconds: float = 15.0
-    prewarm_lora_adapter: str | None = None
     model_load_timeout: float = 300.0
     max_concurrent_synthesis: int = 1
     synthesis_wait_timeout: float = 300.0

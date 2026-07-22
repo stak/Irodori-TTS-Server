@@ -139,23 +139,6 @@
     <div class="status" id="speakStatus"></div>
   </div>
 
-  <div class="card">
-    <h2>Prewarm (POST /v1/admin/prewarm)</h2>
-    <p style="margin:0 0 10px; font-size:12px; color:var(--muted)">
-      CUDAグラフを事前キャプチャして初回リクエストから高速化します。LoRA を使う場合はそのアダプタを指定して Prewarm してください。
-      スケジュール/seed/num_steps はグラフのキーに含まれないため、Prewarm 後も自由に変更できます。
-    </p>
-    <div class="row">
-      <div style="flex:2"><label>LoRA アダプタ（任意）</label>
-        <input type="text" id="pwLora" placeholder="空 = ベースモデル">
-      </div>
-      <div><label>max_seconds</label><input type="number" id="pwMax" value="15" min="1"></div>
-    </div>
-    <div class="checks"><label><input type="checkbox" id="pwHotSwap"> lora_hot_swap</label></div>
-    <button id="btnPrewarm">Prewarm 実行</button>
-    <div class="status" id="prewarmStatus"></div>
-  </div>
-
   <div class="card full">
     <h2>SSE チャンク到着ログ（リクエスト開始からの経過時間）</h2>
     <pre id="sseLog">-</pre>
@@ -202,8 +185,7 @@ async function health() {
     const r = body.runtime, m = body.model;
     setStatus(el,
       `OK — model=${m.id} (${m.model_precision}/${m.codec_precision}, ${m.model_device}) | ` +
-      `loaded=${r.loaded} prewarm=${r.prewarm}\n` +
-      `prewarm_status: ${r.prewarm_status ?? "-"}`, "ok");
+      `loaded=${r.loaded}`, "ok");
   } catch (e) {
     setStatus(el, "接続失敗: " + e.message + "\nサーバーが起動しているか、URL と CORS 設定（IRODORI_CORS_ORIGINS）を確認してください。", "err");
   }
@@ -456,36 +438,9 @@ async function speakSSE(payload, el, t0) {
   }
 }
 
-async function prewarm() {
-  const el = $("prewarmStatus");
-  const btn = $("btnPrewarm");
-  btn.disabled = true;
-  setStatus(el, "Prewarm 実行中...（グラフ数によっては 1 分程度かかります）", "busy");
-  const body = { max_seconds: parseFloat($("pwMax").value) || 15 };
-  const lora = $("pwLora").value.trim();
-  if (lora) body.lora_adapter = lora;
-  if ($("pwHotSwap").checked) body.lora_hot_swap = true;
-  const t0 = performance.now();
-  try {
-    const res = await fetch(base() + "/v1/admin/prewarm", {
-      method: "POST", headers: headers(), body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    $("detail").textContent = JSON.stringify(data, null, 2);
-    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
-    if (res.ok) setStatus(el, `完了 (${elapsed}s):\n${data.status}`, "ok");
-    else setStatus(el, `エラー ${res.status}: ${data?.error?.message ?? ""}`, "err");
-  } catch (e) {
-    setStatus(el, "失敗: " + e.message, "err");
-  } finally {
-    btn.disabled = false;
-  }
-}
-
 $("btnHealth").onclick = () => { health(); loadVoices(); };
 $("btnVoices").onclick = loadVoices;
 $("btnSpeak").onclick = speak;
-$("btnPrewarm").onclick = prewarm;
 $("blendOn").onchange = () => {
   $("blendRows").style.display = $("blendOn").checked ? "" : "none";
   if ($("blendOn").checked && $("blendRows").children.length === 0) {
