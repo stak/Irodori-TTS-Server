@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     # The route is caller-chosen so nothing about the hosted file is baked in here.
     static_file: Path | None = None
     static_route: str = "/"
+    # Optional HTTP Basic auth for the static route only; the API keeps using
+    # api_key. Both must be set together. This guards a hosted file that is
+    # reachable from outside, so it is deliberately independent of the API key:
+    # the file itself usually contains the API key in plain sight.
+    static_auth_user: str | None = None
+    static_auth_password: str | None = None
 
 
 @lru_cache(maxsize=1)

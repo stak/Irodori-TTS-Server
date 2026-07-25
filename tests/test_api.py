@@ -1865,14 +1865,125 @@ def test_static_route_cannot_shadow_a_builtin_route(tmp_path):
 def test_health_reports_static_hosting(tmp_path, monkeypatch):
     monkeypatch.setattr(main.settings, "static_file", None)
     monkeypatch.setattr(main.settings, "static_route", "/")
+    monkeypatch.setattr(main.settings, "static_auth_user", None)
+    monkeypatch.setattr(main.settings, "static_auth_password", None)
 
     static = TestClient(main.app).get("/health").json()["static"]
 
-    assert static == {"file": None, "route": None}
+    assert static == {"file": None, "route": None, "basic_auth": None}
 
     monkeypatch.setattr(main.settings, "static_file", tmp_path / "client.html")
     monkeypatch.setattr(main.settings, "static_route", "/tool")
 
     static = TestClient(main.app).get("/health").json()["static"]
 
-    assert static == {"file": str(tmp_path / "client.html"), "route": "/tool"}
+    assert static == {
+        "file": str(tmp_path / "client.html"),
+        "route": "/tool",
+        "basic_auth": False,
+    }
+
+
+def test_static_basic_auth_challenges_without_credentials(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    settings.static_auth_user = "operator"
+    settings.static_auth_password = "s3cret"
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    response = TestClient(app).get("/tool")
+
+    assert response.status_code == 401
+    # Without this header no browser prompts for credentials, and the app-wide
+    # HTTPException handler drops exc.headers -- hence the direct Response.
+    assert response.headers["www-authenticate"].startswith("Basic realm=")
+
+
+def test_static_basic_auth_accepts_correct_credentials(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    settings.static_auth_user = "operator"
+    settings.static_auth_password = "s3cret"
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    response = TestClient(app).get("/tool", auth=("operator", "s3cret"))
+
+    assert response.status_code == 200
+    assert response.text == "<h1>ok</h1>"
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [("operator", "wrong"), ("wrong", "s3cret"), ("", ""), ("operator", "s3cret ")],
+)
+def test_static_basic_auth_rejects_wrong_credentials(tmp_path, credentials):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    settings.static_auth_user = "operator"
+    settings.static_auth_password = "s3cret"
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    response = TestClient(app).get("/tool", auth=credentials)
+
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Bearer s3cret",
+        "Basic",
+        "Basic !!!not-base64!!!",
+        # Valid base64 but no colon, so there is no password to compare.
+        "Basic " + base64.b64encode(b"operator").decode(),
+    ],
+)
+def test_static_basic_auth_rejects_malformed_headers(tmp_path, header):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    settings.static_auth_user = "operator"
+    settings.static_auth_password = "s3cret"
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    response = TestClient(app).get("/tool", headers={"Authorization": header})
+
+    assert response.status_code == 401
+
+
+def test_static_route_is_unguarded_when_no_credentials_are_configured(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    assert TestClient(app).get("/tool").status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("user", "password"),
+    [("operator", None), (None, "s3cret")],
+)
+def test_static_basic_auth_requires_both_settings(tmp_path, user, password):
+    settings, _ = _static_settings(tmp_path)
+    settings.static_auth_user = user
+    settings.static_auth_password = password
+
+    with pytest.raises(ValueError, match="must be set together"):
+        main.register_static_route(FastAPI(), settings)
+
+
+def test_health_reports_static_basic_auth(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "static_file", tmp_path / "client.html")
+    monkeypatch.setattr(main.settings, "static_route", "/tool")
+    monkeypatch.setattr(main.settings, "static_auth_user", None)
+    monkeypatch.setattr(main.settings, "static_auth_password", None)
+
+    assert TestClient(main.app).get("/health").json()["static"]["basic_auth"] is False
+
+    monkeypatch.setattr(main.settings, "static_auth_user", "operator")
+    monkeypatch.setattr(main.settings, "static_auth_password", "s3cret")
+
+    static = TestClient(main.app).get("/health").json()["static"]
+
+    assert static["basic_auth"] is True
+    # The credentials must never be exposed by an unauthenticated endpoint.
+    assert "s3cret" not in json.dumps(static)

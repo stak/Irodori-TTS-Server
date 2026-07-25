@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import secrets
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -257,6 +258,8 @@ def health() -> dict[str, Any]:
         "static": {
             "file": str(settings.static_file) if settings.static_file else None,
             "route": settings.static_route if settings.static_file else None,
+            # Whether the route is guarded, never the credentials themselves.
+            "basic_auth": settings.static_auth_user is not None if settings.static_file else None,
         },
     }
 
@@ -1439,6 +1442,36 @@ def openai_error_response(message: str, *, status_code: int, error_type: str) ->
     )
 
 
+def _basic_auth_accepts(authorization: str | None, user: str, password: str) -> bool:
+    scheme, _, encoded = (authorization or "").partition(" ")
+    if scheme.lower() != "basic" or not encoded:
+        return False
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    got_user, separator, got_password = decoded.partition(":")
+    if not separator:
+        return False
+    # Compare both halves before combining: `and` would short-circuit and leak
+    # whether the username alone was right.
+    user_ok = secrets.compare_digest(got_user, user)
+    password_ok = secrets.compare_digest(got_password, password)
+    return user_ok and password_ok
+
+
+def _basic_auth_challenge() -> Response:
+    # Returned rather than raised: the app-wide HTTPException handler rewrites
+    # errors into OpenAI-style JSON and drops exc.headers, and without
+    # WWW-Authenticate no browser shows a credential prompt.
+    return Response(
+        status_code=401,
+        content="Unauthorized",
+        media_type="text/plain",
+        headers={"WWW-Authenticate": 'Basic realm="Restricted", charset="UTF-8"'},
+    )
+
+
 def register_static_route(target: FastAPI, config: Settings) -> bool:
     """Serve ``config.static_file`` at ``config.static_route``; no-op when unset.
 
@@ -1451,6 +1484,13 @@ def register_static_route(target: FastAPI, config: Settings) -> bool:
     route = config.static_route
     if not route.startswith("/"):
         raise ValueError(f"IRODORI_STATIC_ROUTE must start with '/': {route!r}")
+    auth_user = config.static_auth_user
+    auth_password = config.static_auth_password
+    if (auth_user is None) != (auth_password is None):
+        raise ValueError(
+            "IRODORI_STATIC_AUTH_USER and IRODORI_STATIC_AUTH_PASSWORD must be set "
+            "together; setting only one would silently leave the route unprotected."
+        )
     # Registering last makes a collision unreachable rather than harmful, so fail
     # loudly instead of serving nothing at a route the operator asked for.
     taken = {getattr(existing, "path", None) for existing in target.routes}
@@ -1461,7 +1501,11 @@ def register_static_route(target: FastAPI, config: Settings) -> bool:
         )
 
     @target.get(route, include_in_schema=False)
-    def serve_static_file() -> FileResponse:
+    def serve_static_file(authorization: str | None = Header(default=None)) -> Response:
+        if auth_user is not None and not _basic_auth_accepts(
+            authorization, auth_user, auth_password
+        ):
+            return _basic_auth_challenge()
         # Resolved per request so the file can be edited or replaced without a
         # restart. no-cache still allows 304s but forces revalidation, otherwise
         # browsers serve a stale copy after the file is updated.
@@ -1474,4 +1518,9 @@ def register_static_route(target: FastAPI, config: Settings) -> bool:
 
 
 if register_static_route(app, settings):
-    logger.info("serving %s at %s", settings.static_file, settings.static_route)
+    logger.info(
+        "serving %s at %s (basic auth %s)",
+        settings.static_file,
+        settings.static_route,
+        "enabled" if settings.static_auth_user is not None else "disabled",
+    )
