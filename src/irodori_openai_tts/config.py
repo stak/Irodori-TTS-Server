@@ -88,6 +88,16 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = Field(default_factory=list)
 
+    # Optional single-file static hosting, off unless static_file is set. Serving a
+    # browser client from the API's own origin makes its API calls same-origin, so
+    # they carry no Origin header and trigger no CORS preflight at all. That is the
+    # only reliable way to reach the API from behind proxies or endpoint security
+    # products that silently drop OPTIONS requests -- a `file://` client cannot,
+    # because its null origin forces every non-simple request to be preflighted.
+    # The route is caller-chosen so nothing about the hosted file is baked in here.
+    static_file: Path | None = None
+    static_route: str = "/"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

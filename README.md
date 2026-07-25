@@ -190,6 +190,30 @@ IRODORI_CORS_ORIGINS=["*"]
 
 Then point the "サーバー URL" field at your server (default `http://127.0.0.1:8088`) and press ヘルスチェック.
 
+### Serving a client from this server
+
+A `file://` page has a null origin, so every request carrying `Authorization` or
+`Content-Type: application/json` must be preflighted. Proxies and endpoint security
+products sometimes drop those `OPTIONS` requests without replying, which looks like a
+working health check (a header-less `GET` is a simple request and needs no preflight)
+followed by synthesis that hangs or fails. Correct CORS configuration cannot help: the
+preflight never reaches the server.
+
+Serving the page from this server instead makes its API calls same-origin, which are
+never preflighted at all. Point `IRODORI_STATIC_FILE` at any HTML file and choose the
+route to serve it at:
+
+```env
+IRODORI_STATIC_FILE=/path/to/your-client.html
+IRODORI_STATIC_ROUTE=/client
+```
+
+The feature is off unless `IRODORI_STATIC_FILE` is set. `IRODORI_STATIC_ROUTE` defaults
+to `/` and must not collide with a built-in route; startup fails if it does. The file is
+read per request, so editing it does not need a restart. A client served this way needs
+no `IRODORI_CORS_ORIGINS` entry, and `GET /health` reports the active setting under
+`static`.
+
 ## API
 
 ### `GET /health`
@@ -624,6 +648,9 @@ All environment variables use the `IRODORI_` prefix. Request fields override the
 | `IRODORI_MAX_NUM_CANDIDATES` | `8` | Upper bound accepted for `n` / `irodori.num_candidates`. |
 | `IRODORI_DEFAULT_LORA_HOT_SWAP` | `false` | Swap LoRA adapter weights in place on adapter switches so cached CUDA graphs survive. |
 | `IRODORI_DEFAULT_APPLY_WATERMARK` | `true` | Embed the SilentCipher AI-generation watermark in generated audio. |
+| `IRODORI_CORS_ORIGINS` | unset | JSON list of allowed CORS origins, e.g. `["*"]`. CORS middleware is only installed when this is non-empty. |
+| `IRODORI_STATIC_FILE` | unset | Path to a single file (typically an HTML client) to serve. Static hosting is off while unset. See [Serving a client from this server](#serving-a-client-from-this-server). |
+| `IRODORI_STATIC_ROUTE` | `/` | Route that `IRODORI_STATIC_FILE` is served at. Must start with `/` and must not collide with a built-in route. |
 
 The following variables are read by the [Irodori-TTS performance fork](https://github.com/stak/Irodori-TTS/blob/main/docs/performance.md) directly from the process environment (defaults shown; all optimizations are inference-only):
 

@@ -7,6 +7,7 @@ import threading
 
 import pytest
 import torch
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from irodori_openai_tts import app as main
@@ -1790,3 +1791,88 @@ def test_openai_speed_maps_to_inverse_duration_scale():
     request = main._build_sampling_request(payload, voice)
 
     assert request.duration_scale == 0.8
+
+
+def _static_settings(tmp_path, *, route="/", name="client.html", body="<h1>ok</h1>"):
+    target = tmp_path / name
+    target.write_text(body, encoding="utf-8")
+    settings = main.Settings(static_file=target, static_route=route)
+    return settings, target
+
+
+def test_static_route_is_absent_unless_static_file_is_set():
+    app = FastAPI()
+    before = list(app.routes)
+
+    # Explicit None so a stray IRODORI_STATIC_FILE in the environment cannot
+    # turn this into a false pass.
+    assert main.register_static_route(app, main.Settings(static_file=None)) is False
+    assert app.routes == before
+
+
+def test_static_file_is_served_at_the_configured_route(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    app = FastAPI()
+
+    assert main.register_static_route(app, settings) is True
+
+    response = TestClient(app).get("/tool")
+
+    assert response.status_code == 200
+    assert response.text == "<h1>ok</h1>"
+    assert response.headers["content-type"].startswith("text/html")
+    # Must revalidate, otherwise an edited file keeps serving stale from cache.
+    assert response.headers["cache-control"] == "no-cache"
+
+
+def test_static_file_is_reread_per_request(tmp_path):
+    settings, target = _static_settings(tmp_path)
+    app = FastAPI()
+    main.register_static_route(app, settings)
+    client = TestClient(app)
+
+    assert client.get("/").text == "<h1>ok</h1>"
+    target.write_text("<h1>edited</h1>", encoding="utf-8")
+
+    assert client.get("/").text == "<h1>edited</h1>"
+
+
+def test_missing_static_file_reports_404(tmp_path):
+    settings, target = _static_settings(tmp_path)
+    target.unlink()
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    response = TestClient(app).get("/")
+
+    assert response.status_code == 404
+
+
+def test_static_route_must_be_absolute(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="tool")
+
+    with pytest.raises(ValueError, match="must start with"):
+        main.register_static_route(FastAPI(), settings)
+
+
+def test_static_route_cannot_shadow_a_builtin_route(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="/health")
+
+    with pytest.raises(ValueError, match="already served"):
+        main.register_static_route(main.app, settings)
+
+
+def test_health_reports_static_hosting(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "static_file", None)
+    monkeypatch.setattr(main.settings, "static_route", "/")
+
+    static = TestClient(main.app).get("/health").json()["static"]
+
+    assert static == {"file": None, "route": None}
+
+    monkeypatch.setattr(main.settings, "static_file", tmp_path / "client.html")
+    monkeypatch.setattr(main.settings, "static_route", "/tool")
+
+    static = TestClient(main.app).get("/health").json()["static"]
+
+    assert static == {"file": str(tmp_path / "client.html"), "route": "/tool"}
