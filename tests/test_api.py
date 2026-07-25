@@ -7,6 +7,7 @@ import threading
 
 import pytest
 import torch
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from irodori_openai_tts import app as main
@@ -1790,3 +1791,199 @@ def test_openai_speed_maps_to_inverse_duration_scale():
     request = main._build_sampling_request(payload, voice)
 
     assert request.duration_scale == 0.8
+
+
+def _static_settings(tmp_path, *, route="/", name="client.html", body="<h1>ok</h1>"):
+    target = tmp_path / name
+    target.write_text(body, encoding="utf-8")
+    settings = main.Settings(static_file=target, static_route=route)
+    return settings, target
+
+
+def test_static_route_is_absent_unless_static_file_is_set():
+    app = FastAPI()
+    before = list(app.routes)
+
+    # Explicit None so a stray IRODORI_STATIC_FILE in the environment cannot
+    # turn this into a false pass.
+    assert main.register_static_route(app, main.Settings(static_file=None)) is False
+    assert app.routes == before
+
+
+def test_static_file_is_served_at_the_configured_route(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    app = FastAPI()
+
+    assert main.register_static_route(app, settings) is True
+
+    response = TestClient(app).get("/tool")
+
+    assert response.status_code == 200
+    assert response.text == "<h1>ok</h1>"
+    assert response.headers["content-type"].startswith("text/html")
+    # Must revalidate, otherwise an edited file keeps serving stale from cache.
+    assert response.headers["cache-control"] == "no-cache"
+
+
+def test_static_file_is_reread_per_request(tmp_path):
+    settings, target = _static_settings(tmp_path)
+    app = FastAPI()
+    main.register_static_route(app, settings)
+    client = TestClient(app)
+
+    assert client.get("/").text == "<h1>ok</h1>"
+    target.write_text("<h1>edited</h1>", encoding="utf-8")
+
+    assert client.get("/").text == "<h1>edited</h1>"
+
+
+def test_missing_static_file_reports_404(tmp_path):
+    settings, target = _static_settings(tmp_path)
+    target.unlink()
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    response = TestClient(app).get("/")
+
+    assert response.status_code == 404
+
+
+def test_static_route_must_be_absolute(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="tool")
+
+    with pytest.raises(ValueError, match="must start with"):
+        main.register_static_route(FastAPI(), settings)
+
+
+def test_static_route_cannot_shadow_a_builtin_route(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="/health")
+
+    with pytest.raises(ValueError, match="already served"):
+        main.register_static_route(main.app, settings)
+
+
+def test_health_reports_static_hosting(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "static_file", None)
+    monkeypatch.setattr(main.settings, "static_route", "/")
+    monkeypatch.setattr(main.settings, "static_auth_user", None)
+    monkeypatch.setattr(main.settings, "static_auth_password", None)
+
+    static = TestClient(main.app).get("/health").json()["static"]
+
+    assert static == {"file": None, "route": None, "basic_auth": None}
+
+    monkeypatch.setattr(main.settings, "static_file", tmp_path / "client.html")
+    monkeypatch.setattr(main.settings, "static_route", "/tool")
+
+    static = TestClient(main.app).get("/health").json()["static"]
+
+    assert static == {
+        "file": str(tmp_path / "client.html"),
+        "route": "/tool",
+        "basic_auth": False,
+    }
+
+
+def test_static_basic_auth_challenges_without_credentials(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    settings.static_auth_user = "operator"
+    settings.static_auth_password = "s3cret"
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    response = TestClient(app).get("/tool")
+
+    assert response.status_code == 401
+    # Without this header no browser prompts for credentials, and the app-wide
+    # HTTPException handler drops exc.headers -- hence the direct Response.
+    assert response.headers["www-authenticate"].startswith("Basic realm=")
+
+
+def test_static_basic_auth_accepts_correct_credentials(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    settings.static_auth_user = "operator"
+    settings.static_auth_password = "s3cret"
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    response = TestClient(app).get("/tool", auth=("operator", "s3cret"))
+
+    assert response.status_code == 200
+    assert response.text == "<h1>ok</h1>"
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [("operator", "wrong"), ("wrong", "s3cret"), ("", ""), ("operator", "s3cret ")],
+)
+def test_static_basic_auth_rejects_wrong_credentials(tmp_path, credentials):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    settings.static_auth_user = "operator"
+    settings.static_auth_password = "s3cret"
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    response = TestClient(app).get("/tool", auth=credentials)
+
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Bearer s3cret",
+        "Basic",
+        "Basic !!!not-base64!!!",
+        # Valid base64 but no colon, so there is no password to compare.
+        "Basic " + base64.b64encode(b"operator").decode(),
+    ],
+)
+def test_static_basic_auth_rejects_malformed_headers(tmp_path, header):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    settings.static_auth_user = "operator"
+    settings.static_auth_password = "s3cret"
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    response = TestClient(app).get("/tool", headers={"Authorization": header})
+
+    assert response.status_code == 401
+
+
+def test_static_route_is_unguarded_when_no_credentials_are_configured(tmp_path):
+    settings, _ = _static_settings(tmp_path, route="/tool")
+    app = FastAPI()
+    main.register_static_route(app, settings)
+
+    assert TestClient(app).get("/tool").status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("user", "password"),
+    [("operator", None), (None, "s3cret")],
+)
+def test_static_basic_auth_requires_both_settings(tmp_path, user, password):
+    settings, _ = _static_settings(tmp_path)
+    settings.static_auth_user = user
+    settings.static_auth_password = password
+
+    with pytest.raises(ValueError, match="must be set together"):
+        main.register_static_route(FastAPI(), settings)
+
+
+def test_health_reports_static_basic_auth(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "static_file", tmp_path / "client.html")
+    monkeypatch.setattr(main.settings, "static_route", "/tool")
+    monkeypatch.setattr(main.settings, "static_auth_user", None)
+    monkeypatch.setattr(main.settings, "static_auth_password", None)
+
+    assert TestClient(main.app).get("/health").json()["static"]["basic_auth"] is False
+
+    monkeypatch.setattr(main.settings, "static_auth_user", "operator")
+    monkeypatch.setattr(main.settings, "static_auth_password", "s3cret")
+
+    static = TestClient(main.app).get("/health").json()["static"]
+
+    assert static["basic_auth"] is True
+    # The credentials must never be exposed by an unauthenticated endpoint.
+    assert "s3cret" not in json.dumps(static)

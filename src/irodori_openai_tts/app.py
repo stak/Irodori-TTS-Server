@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import secrets
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ import torch
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from irodori_tts.inference_runtime import SamplingRequest, SamplingResult
@@ -29,7 +30,7 @@ from irodori_tts.speaker_inversion import (
 )
 
 from .audio import CONTENT_TYPES, encode_audio, normalize_response_format
-from .config import get_settings
+from .config import Settings, get_settings
 from .runtime import RuntimeLoadTimeoutError, RuntimeManager
 from .voices import RefEmbedBlendSource, VoiceRegistry, VoiceSpec
 
@@ -253,6 +254,12 @@ def health() -> dict[str, Any]:
             "first_sentence_chunk_min_chars": settings.default_first_sentence_chunk_min_chars,
             "lora_hot_swap": settings.default_lora_hot_swap,
             "apply_watermark": settings.default_apply_watermark,
+        },
+        "static": {
+            "file": str(settings.static_file) if settings.static_file else None,
+            "route": settings.static_route if settings.static_file else None,
+            # Whether the route is guarded, never the credentials themselves.
+            "basic_auth": settings.static_auth_user is not None if settings.static_file else None,
         },
     }
 
@@ -1432,4 +1439,88 @@ def openai_error_response(message: str, *, status_code: int, error_type: str) ->
                 "code": None,
             }
         },
+    )
+
+
+def _basic_auth_accepts(authorization: str | None, user: str, password: str) -> bool:
+    scheme, _, encoded = (authorization or "").partition(" ")
+    if scheme.lower() != "basic" or not encoded:
+        return False
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    got_user, separator, got_password = decoded.partition(":")
+    if not separator:
+        return False
+    # Compare both halves before combining: `and` would short-circuit and leak
+    # whether the username alone was right.
+    user_ok = secrets.compare_digest(got_user, user)
+    password_ok = secrets.compare_digest(got_password, password)
+    return user_ok and password_ok
+
+
+def _basic_auth_challenge() -> Response:
+    # Returned rather than raised: the app-wide HTTPException handler rewrites
+    # errors into OpenAI-style JSON and drops exc.headers, and without
+    # WWW-Authenticate no browser shows a credential prompt.
+    return Response(
+        status_code=401,
+        content="Unauthorized",
+        media_type="text/plain",
+        headers={"WWW-Authenticate": 'Basic realm="Restricted", charset="UTF-8"'},
+    )
+
+
+def register_static_route(target: FastAPI, config: Settings) -> bool:
+    """Serve ``config.static_file`` at ``config.static_route``; no-op when unset.
+
+    Returns whether a route was registered. Call this after the API routes are
+    defined: registering last means a static route can never shadow the API, so a
+    stray value cannot take /health or /v1/... away from their real handlers.
+    """
+    if config.static_file is None:
+        return False
+    route = config.static_route
+    if not route.startswith("/"):
+        raise ValueError(f"IRODORI_STATIC_ROUTE must start with '/': {route!r}")
+    auth_user = config.static_auth_user
+    auth_password = config.static_auth_password
+    if (auth_user is None) != (auth_password is None):
+        raise ValueError(
+            "IRODORI_STATIC_AUTH_USER and IRODORI_STATIC_AUTH_PASSWORD must be set "
+            "together; setting only one would silently leave the route unprotected."
+        )
+    # Registering last makes a collision unreachable rather than harmful, so fail
+    # loudly instead of serving nothing at a route the operator asked for.
+    taken = {getattr(existing, "path", None) for existing in target.routes}
+    if route in taken:
+        raise ValueError(
+            f"IRODORI_STATIC_ROUTE {route!r} is already served by a built-in route; "
+            "pick a path that is not in use."
+        )
+
+    @target.get(route, include_in_schema=False)
+    def serve_static_file(authorization: str | None = Header(default=None)) -> Response:
+        if auth_user is not None and not _basic_auth_accepts(
+            authorization, auth_user, auth_password
+        ):
+            return _basic_auth_challenge()
+        # Resolved per request so the file can be edited or replaced without a
+        # restart. no-cache still allows 304s but forces revalidation, otherwise
+        # browsers serve a stale copy after the file is updated.
+        path = config.static_file.expanduser()
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail=f"Static file not found: {path}")
+        return FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+    return True
+
+
+if register_static_route(app, settings):
+    logger.info(
+        "serving %s at %s (basic auth %s)",
+        settings.static_file,
+        settings.static_route,
+        "enabled" if settings.static_auth_user is not None else "disabled",
     )
