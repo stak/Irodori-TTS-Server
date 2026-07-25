@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     default_t_schedule_mode: str = "linear"
     default_sway_coeff: float = -1.0
     default_duration_scale: float = 1.0
+    default_duration_ignore_speaker: bool = False
     default_min_seconds: float = 0.5
     default_max_seconds: float = 30.0
     default_cfg_scale_text: float = 3.0

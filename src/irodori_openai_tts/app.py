@@ -65,6 +65,7 @@ class IrodoriOptions(BaseModel):
     no_ref: bool | None = None
     seconds: float | None = None
     duration_scale: float | None = None
+    duration_ignore_speaker: bool | None = None
     min_seconds: float | None = None
     max_seconds: float | None = None
     max_ref_seconds: float | None = None
@@ -1179,6 +1180,13 @@ def _build_sampling_request(payload: SpeechRequest, voice: VoiceSpec) -> Samplin
         ),
         seconds=_as_optional_float(seconds, "seconds"),
         duration_scale=duration_scale,
+        duration_ignore_speaker=bool(
+            _coalesce(
+                opts.duration_ignore_speaker,
+                _extra(payload, "duration_ignore_speaker"),
+                settings.default_duration_ignore_speaker,
+            )
+        ),
         min_seconds=_as_float(
             _coalesce(
                 opts.min_seconds, _extra(payload, "min_seconds"), settings.default_min_seconds

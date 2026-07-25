@@ -431,6 +431,7 @@ Common `irodori` options:
 | `lora_adapter` | PEFT LoRA adapter directory to load dynamically for this request. The adapter is not merged into the base checkpoint. |
 | `t_schedule_mode` | Sampling schedule, usually `linear` or `sway`. |
 | `sway_coeff` | Sway schedule coefficient when using `t_schedule_mode: "sway"`. |
+| `duration_ignore_speaker` | Predict length from the unconditional speaker token, so the speaker condition (Speaker Inversion embedding or reference audio) drives timbre only, not duration. Useful when the duration predictor was trained speaker-unconditioned — e.g. a per-character LoRA baked without speaker conditioning so SI stays applicable: supplying any speaker condition then routes duration through a path the predictor never trained and shifts predicted length off the intended pacing, which this restores. Default from `IRODORI_DEFAULT_DURATION_IGNORE_SPEAKER`. |
 | `lora_hot_swap` | Swap LoRA adapter weights in place so cached CUDA graphs survive the switch. Default from `IRODORI_DEFAULT_LORA_HOT_SWAP`. Refused automatically for incompatible adapters (DoRA, or `modules_to_save` beyond `duration_predictor`). |
 | `apply_watermark` | Set `false` to skip the SilentCipher AI-generation watermark (~15 ms per request). Default from `IRODORI_DEFAULT_APPLY_WATERMARK`. |
 | `chunks` | Explicit list of chunk texts (hard split boundaries). Takes precedence over `input`, which is still required but used only for logging. Combine with `chunking_enabled: false` to prevent any further automatic splitting inside each chunk. Cannot be combined with `seconds`. |
@@ -655,6 +656,7 @@ All environment variables use the `IRODORI_` prefix. Request fields override the
 | `IRODORI_DEFAULT_T_SCHEDULE_MODE` | `linear` | Default timestep schedule. |
 | `IRODORI_DEFAULT_SWAY_COEFF` | `-1.0` | Default sway coefficient. Used only when `t_schedule_mode` is `sway`. |
 | `IRODORI_DEFAULT_DURATION_SCALE` | `1.0` | Default duration scale. |
+| `IRODORI_DEFAULT_DURATION_IGNORE_SPEAKER` | `false` | Default for predicting length from the unconditional speaker token (see `duration_ignore_speaker`). |
 | `IRODORI_DEFAULT_CFG_SCALE_TEXT` | `3.0` | Default text CFG scale. |
 | `IRODORI_DEFAULT_CFG_SCALE_SPEAKER` | `5.0` | Default speaker CFG scale. |
 | `IRODORI_DEFAULT_CFG_GUIDANCE_MODE` | `independent` | Default CFG guidance mode. |

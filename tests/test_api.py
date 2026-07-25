@@ -1793,6 +1793,45 @@ def test_openai_speed_maps_to_inverse_duration_scale():
     assert request.duration_scale == 0.8
 
 
+def test_duration_ignore_speaker_defaults_false():
+    payload = main.SpeechRequest(model="irodori-tts", input="こんにちは。", voice="none")
+    voice = main.VoiceSpec(voice_id="none", no_ref=True)
+
+    request = main._build_sampling_request(payload, voice)
+
+    assert request.duration_ignore_speaker is False
+
+
+def test_duration_ignore_speaker_from_irodori_option():
+    payload = main.SpeechRequest(
+        model="irodori-tts",
+        input="こんにちは。",
+        voice="none",
+        irodori={"duration_ignore_speaker": True},
+    )
+    voice = main.VoiceSpec(voice_id="none", no_ref=True)
+
+    request = main._build_sampling_request(payload, voice)
+
+    assert request.duration_ignore_speaker is True
+
+
+def test_duration_ignore_speaker_from_top_level_extra():
+    payload = main.SpeechRequest.model_validate(
+        {
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "duration_ignore_speaker": True,
+        }
+    )
+    voice = main.VoiceSpec(voice_id="none", no_ref=True)
+
+    request = main._build_sampling_request(payload, voice)
+
+    assert request.duration_ignore_speaker is True
+
+
 def _static_settings(tmp_path, *, route="/", name="client.html", body="<h1>ok</h1>"):
     target = tmp_path / name
     target.write_text(body, encoding="utf-8")
