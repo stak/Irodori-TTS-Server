@@ -201,3 +201,68 @@ def _encode_with_ffmpeg(wav: torch.Tensor, sample_rate: int, fmt: str) -> bytes:
         ]
         subprocess.run(command, check=True, capture_output=True)
         return target.read_bytes()
+
+
+def decode_audio(data: bytes) -> tuple[torch.Tensor, int]:
+    """
+    Decode an uploaded audio clip to a mono float waveform and its sample rate.
+
+    Mirrors encode_audio's fallback chain in reverse: soundfile handles the
+    WAV/FLAC/OGG cases, torchaudio picks up what it can, and ffmpeg covers
+    container formats neither reads -- notably the WebM/Opus that browser
+    MediaRecorder produces.
+    """
+    if not data:
+        raise ValueError("Audio payload is empty.")
+
+    errors: list[str] = []
+    for reader in (_decode_with_soundfile, _decode_with_torchaudio, _decode_with_ffmpeg):
+        try:
+            wav, sample_rate = reader(data)
+        except Exception as exc:  # noqa: BLE001 - try the next reader
+            errors.append(f"{reader.__name__}: {exc}")
+            continue
+        if wav.ndim == 2:
+            wav = wav.mean(dim=0)
+        if wav.ndim != 1:
+            raise ValueError(f"Expected a mono or multi-channel clip, got shape {tuple(wav.shape)}")
+        if wav.numel() == 0:
+            raise ValueError("Decoded audio contains no samples.")
+        return wav.detach().cpu().float().contiguous(), int(sample_rate)
+
+    raise ValueError("Could not decode the audio payload. Tried " + "; ".join(errors))
+
+
+def _decode_with_soundfile(data: bytes) -> tuple[torch.Tensor, int]:
+    array, sample_rate = sf.read(BytesIO(data), dtype="float32", always_2d=True)
+    return torch.from_numpy(array).transpose(0, 1), sample_rate
+
+
+def _decode_with_torchaudio(data: bytes) -> tuple[torch.Tensor, int]:
+    wav, sample_rate = torchaudio.load(BytesIO(data))
+    return wav, sample_rate
+
+
+def _decode_with_ffmpeg(data: bytes) -> tuple[torch.Tensor, int]:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg is not available")
+    with TemporaryDirectory() as directory:
+        source = Path(directory) / "input"
+        target = Path(directory) / "decoded.wav"
+        source.write_bytes(data)
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-f",
+            "wav",
+            str(target),
+        ]
+        subprocess.run(command, check=True, capture_output=True)
+        array, sample_rate = sf.read(target, dtype="float32", always_2d=True)
+        return torch.from_numpy(array).transpose(0, 1), sample_rate

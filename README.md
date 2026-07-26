@@ -432,6 +432,14 @@ Common `irodori` options:
 | `t_schedule_mode` | Sampling schedule, usually `linear` or `sway`. |
 | `sway_coeff` | Sway schedule coefficient when using `t_schedule_mode: "sway"`. |
 | `duration_ignore_speaker` | Predict length from the unconditional speaker token, so the speaker condition (Speaker Inversion embedding or reference audio) drives timbre only, not duration. Useful when the duration predictor was trained speaker-unconditioned — e.g. a per-character LoRA baked without speaker conditioning so SI stays applicable: supplying any speaker condition then routes duration through a path the predictor never trained and shifts predicted length off the intended pacing, which this restores. Default from `IRODORI_DEFAULT_DURATION_IGNORE_SPEAKER`. |
+| `perf_wav` | Performance-transfer source: a recording on the host whose acting — length, pausing, rhythm, and to a degree intonation — is carried into the output while the voice above still decides the timbre. It must say the same line as `input`. Requires `perf_strength`. See [Performance Transfer](#performance-transfer). |
+| `perf_latent` | Performance source as a precomputed latent (`.pt`) instead of `perf_wav`. |
+| `perf_audio_b64` | Performance source sent inline as base64 audio, which is what a browser recording uses. WAV, FLAC and OGG decode directly; other containers need `ffmpeg` on the host. Cannot be combined with `perf_wav`/`perf_latent`. |
+| `perf_strength` | SDEdit noise strength `tau` in `(0, 1]`: how much to respect the recording. `1.0` ignores it, smaller values follow it more closely. Usable range is roughly `0.75`–`0.90`; below it the output's timbre flips onto the performance speaker. Required whenever a performance source is given. |
+| `perf_normalize` | `none` (default), `center` or `adain`. Rewrites the source's per-channel latent statistics to the target character's so its timbre pulls the output less. Barely matters with a LoRA voice, which anchors timbre on its own; a Speaker-Inversion-only voice depends on it. |
+| `perf_norm_wav` | Audio of **the target character** supplying the statistics `perf_normalize` normalizes toward — not the performance source. One utterance is enough. Optional when the request uses a LoRA adapter that ships statistics, or a reference-audio voice. |
+| `perf_norm_latent` | Target-character statistics source as a latent (`.pt`). |
+| `perf_norm_stats` | Target-character statistics source as a precomputed statistics file, as LoRA training writes into each checkpoint. Avoids re-encoding audio per request. |
 | `lora_hot_swap` | Swap LoRA adapter weights in place so cached CUDA graphs survive the switch. Default from `IRODORI_DEFAULT_LORA_HOT_SWAP`. Refused automatically for incompatible adapters (DoRA, or `modules_to_save` beyond `duration_predictor`). |
 | `apply_watermark` | Set `false` to skip the SilentCipher AI-generation watermark (~15 ms per request). Default from `IRODORI_DEFAULT_APPLY_WATERMARK`. |
 | `chunks` | Explicit list of chunk texts (hard split boundaries). Takes precedence over `input`, which is still required but used only for logging. Combine with `chunking_enabled: false` to prevent any further automatic splitting inside each chunk. Cannot be combined with `seconds`. |
@@ -535,6 +543,46 @@ curl http://localhost:8088/v1/audio/voices \
   -F voice_id=sample \
   -F file=@sample.wav
 ```
+
+## Performance Transfer
+
+Lets a recording direct the *acting* of a generation while the voice still comes from the
+requested voice, so a user can record how they want a line delivered and have a character
+perform it. The recording must say the same line as `input`; its content otherwise fights the
+text condition and the output garbles. Output length comes from the recording.
+
+```bash
+curl -sS http://127.0.0.1:8088/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -o out.wav \
+  -d '{
+    "model": "irodori-tts",
+    "input": "じゃあ見せてやるよ、魔術師の本気ってやつを",
+    "voice": "my-character",
+    "response_format": "wav",
+    "irodori": {
+      "perf_wav": "/srv/clips/my_take.wav",
+      "perf_strength": 0.8,
+      "perf_normalize": "adain"
+    }
+  }'
+```
+
+Browser clients send the clip inline instead, as base64 in `perf_audio_b64`.
+
+`perf_strength` is the one knob that matters. It does not degrade gracefully: below its usable
+range the output's timbre flips onto the performance speaker, usually through an unstable
+in-between that sounds synthetic, and where that happens depends on how far apart the two
+voices are. Expect a short sweep per pairing, and note that it interacts with the seed, so
+`n` (Best-of-N) is useful here.
+
+`perf_normalize` exists to push that boundary lower by stripping the source's own timbre. It
+needs the target character's own statistics, resolved from `perf_norm_*`, else the request's
+LoRA adapter (training writes them into every checkpoint), else the reference audio. A
+Speaker-Inversion-only voice has no audio to measure, so it must supply `perf_norm_wav`.
+
+See the fork's [parameter guide](https://github.com/stak/Irodori-TTS/blob/main/docs/parameters.md#performance-transfer)
+for the underlying knobs.
 
 ## Long Text Chunking
 

@@ -29,7 +29,7 @@ from irodori_tts.speaker_inversion import (
     load_speaker_inversion_payload,
 )
 
-from .audio import CONTENT_TYPES, encode_audio, normalize_response_format
+from .audio import CONTENT_TYPES, decode_audio, encode_audio, normalize_response_format
 from .config import Settings, get_settings
 from .runtime import RuntimeLoadTimeoutError, RuntimeManager
 from .voices import RefEmbedBlendSource, VoiceRegistry, VoiceSpec
@@ -97,6 +97,22 @@ class IrodoriOptions(BaseModel):
     tail_mean_threshold: float | None = None
     max_text_len: int | None = None
     max_caption_len: int | None = None
+    # Performance transfer: direct the acting with a recording while the voice
+    # above still decides the timbre. The recording must say the same line as
+    # `input`. perf_audio_b64 carries a clip inline (base64), which is what a
+    # browser recording uses; perf_wav/perf_latent read one already on the host.
+    perf_wav: str | None = None
+    perf_latent: str | None = None
+    perf_audio_b64: str | None = None
+    perf_strength: float | None = None
+    # Strips the source's own timbre so it pulls the output's voice less. Needs
+    # the target character's statistics: from perf_norm_*, else the LoRA adapter,
+    # else the reference audio. Barely matters with a LoRA, which anchors timbre
+    # on its own; a Speaker-Inversion-only voice depends on it.
+    perf_normalize: Literal["none", "center", "adain"] | None = None
+    perf_norm_wav: str | None = None
+    perf_norm_latent: str | None = None
+    perf_norm_stats: str | None = None
     lora_adapter: str | None = None
     lora_hot_swap: bool | None = None
     apply_watermark: bool | None = None
@@ -1109,8 +1125,31 @@ def _blend_ref_embeds(
     return blended
 
 
+def _resolve_performance_source(payload: SpeechRequest) -> tuple[Any, int | None]:
+    """
+    Decode an inline performance clip, if one was sent.
+
+    Returns (waveform, sample_rate) for SamplingRequest.perf_audio, or
+    (None, None) when the request points at a clip on the host instead.
+    """
+    opts = payload.irodori
+    encoded = _coalesce(opts.perf_audio_b64, _extra(payload, "perf_audio_b64"))
+    if encoded is None:
+        return None, None
+    if opts.perf_wav is not None or opts.perf_latent is not None:
+        raise ValueError("perf_audio_b64 cannot be combined with perf_wav/perf_latent.")
+    try:
+        data = base64.b64decode(str(encoded), validate=True)
+    except Exception as exc:
+        raise ValueError(f"perf_audio_b64 is not valid base64: {exc}") from exc
+    waveform, sample_rate = decode_audio(data)
+    return waveform, sample_rate
+
+
 def _build_sampling_request(payload: SpeechRequest, voice: VoiceSpec) -> SamplingRequest:
     opts = payload.irodori
+
+    perf_audio, perf_audio_sample_rate = _resolve_performance_source(payload)
 
     ref_speaker_embedding = None
     if voice.ref_embed_blend:
@@ -1206,6 +1245,33 @@ def _build_sampling_request(payload: SpeechRequest, voice: VoiceSpec) -> Samplin
                 settings.default_max_ref_seconds,
             ),
             "max_ref_seconds",
+        ),
+        perf_wav=_as_optional_str(
+            _coalesce(opts.perf_wav, _extra(payload, "perf_wav"), None), "perf_wav"
+        ),
+        perf_latent=_as_optional_str(
+            _coalesce(opts.perf_latent, _extra(payload, "perf_latent"), None), "perf_latent"
+        ),
+        perf_audio=perf_audio,
+        perf_audio_sample_rate=perf_audio_sample_rate,
+        perf_strength=_as_optional_float(
+            _coalesce(opts.perf_strength, _extra(payload, "perf_strength"), None),
+            "perf_strength",
+        ),
+        perf_normalize=str(
+            _coalesce(opts.perf_normalize, _extra(payload, "perf_normalize"), "none")
+        ),
+        perf_norm_wav=_as_optional_str(
+            _coalesce(opts.perf_norm_wav, _extra(payload, "perf_norm_wav"), None),
+            "perf_norm_wav",
+        ),
+        perf_norm_latent=_as_optional_str(
+            _coalesce(opts.perf_norm_latent, _extra(payload, "perf_norm_latent"), None),
+            "perf_norm_latent",
+        ),
+        perf_norm_stats=_as_optional_str(
+            _coalesce(opts.perf_norm_stats, _extra(payload, "perf_norm_stats"), None),
+            "perf_norm_stats",
         ),
         max_text_len=_as_optional_int(
             _coalesce(opts.max_text_len, _extra(payload, "max_text_len"), None),
@@ -1376,6 +1442,63 @@ def _validate_sampling_request(request: SamplingRequest) -> None:
                 "Raise IRODORI_MAX_NUM_CANDIDATES to allow more."
             ),
         )
+
+    perf_sources = [
+        name
+        for name, value in (
+            ("perf_wav", request.perf_wav),
+            ("perf_latent", request.perf_latent),
+            ("perf_audio_b64", request.perf_audio),
+        )
+        if value is not None
+    ]
+    if len(perf_sources) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Use exactly one performance source; got " + ", ".join(perf_sources) + ".",
+        )
+    if request.perf_strength is not None and not (0.0 < float(request.perf_strength) <= 1.0):
+        raise HTTPException(
+            status_code=400, detail="perf_strength must be greater than 0 and at most 1."
+        )
+    if perf_sources and request.perf_strength is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A performance source requires perf_strength (tau in (0, 1]); "
+                "0.80 is a reasonable starting point."
+            ),
+        )
+    normalize = str(request.perf_normalize).strip().lower()
+    if normalize not in {"none", "center", "adain"}:
+        raise HTTPException(
+            status_code=400, detail="perf_normalize must be one of: none, center, adain."
+        )
+    # The library resolves the target statistics from perf_norm_*, the LoRA
+    # adapter, or the reference audio, and raises when none is available. Catch
+    # the case it cannot see -- a Speaker Inversion voice with nothing supplied --
+    # here, so it reports as a request error rather than a synthesis failure.
+    if normalize != "none" and perf_sources:
+        has_stats_source = any(
+            value is not None
+            for value in (
+                request.perf_norm_wav,
+                request.perf_norm_latent,
+                request.perf_norm_stats,
+                request.lora_adapter,
+                request.ref_wav,
+                request.ref_latent,
+            )
+        )
+        if not has_stats_source:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "perf_normalize needs the target character's own statistics: supply "
+                    "perf_norm_wav (or perf_norm_latent/perf_norm_stats), use a LoRA adapter "
+                    "whose checkpoint ships them, or use a reference-audio voice."
+                ),
+            )
 
 
 def _extra(payload: SpeechRequest, key: str) -> Any:
