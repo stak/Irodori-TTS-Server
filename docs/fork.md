@@ -116,7 +116,7 @@ With `n > 1` the response is JSON instead of raw audio bytes:
 {
   "object": "speech.candidates",
   "seed": 1234,
-  "sample_rate": 44100,
+  "sample_rate": 48000,
   "candidates": [
     {"index": 0, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1234, "duration_sec": 3.2},
     {"index": 1, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1235, "duration_sec": 3.4},
