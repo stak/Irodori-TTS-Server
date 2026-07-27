@@ -13,6 +13,7 @@ easy to merge.
 - [Performance profile](#performance-profile)
 - [Best-of-N candidates](#best-of-n-candidates)
 - [Speaker Inversion blending](#speaker-inversion-blending)
+- [Performance transfer](#performance-transfer)
 - [`duration_ignore_speaker`](#duration_ignore_speaker)
 - [LoRA hot-swap](#lora-hot-swap)
 - [Watermark toggle](#watermark-toggle)
@@ -209,6 +210,60 @@ files:
 - The blend is deterministic: given the same weights it is bit-identical to pre-baking the
   file with Irodori-TTS's `blend_speaker_embeddings.py` and passing it as a voice.
 
+## Performance transfer
+
+Lets a recording direct the *acting* of a generation while the timbre still comes from the
+requested voice, so a user can record how they want a line delivered and have a character
+perform it. The recording must say the same line as `input`; other content fights the text
+condition and the output garbles. Output length comes from the recording.
+
+```bash
+curl -sS http://127.0.0.1:8088/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -o out.wav \
+  -d '{
+    "model": "irodori-tts",
+    "input": "これは演技転写のテストです。",
+    "voice": "my-character",
+    "response_format": "wav",
+    "irodori": {
+      "perf_wav": "/srv/clips/my_take.wav",
+      "perf_strength": 0.8,
+      "perf_normalize": "adain"
+    }
+  }'
+```
+
+| Field | Notes |
+| --- | --- |
+| `perf_wav` | Performance source: a recording already on the host whose acting — length, pausing, rhythm, and to a degree intonation — is carried into the output. Requires `perf_strength`. |
+| `perf_latent` | Performance source as a precomputed latent (`.pt`) instead of `perf_wav`. |
+| `perf_audio_b64` | Performance source sent inline as base64 audio, which is what a browser recording uses (a browser has no host-side file). Decoding tries `soundfile`, then `torchaudio`, then `ffmpeg`, so WAV/FLAC/OGG work everywhere and the WebM/Opus that `MediaRecorder` produces works where `ffmpeg` is installed. Cannot be combined with `perf_wav`/`perf_latent` (`400`). |
+| `perf_strength` | SDEdit noise strength `tau` in `(0, 1]`: how much to respect the recording. `1.0` ignores it; smaller values follow it more closely. **Required whenever a performance source is given** — it has no default because it does not degrade gracefully. |
+| `perf_normalize` | `none` (default), `center` or `adain`. Rewrites the source's per-channel latent statistics toward the target character's so the source's timbre pulls the output less. |
+| `perf_norm_wav` | Audio of **the target character** supplying the statistics to normalize toward — not the performance source. One utterance is enough. |
+| `perf_norm_latent` | Target-character statistics source as a latent (`.pt`). |
+| `perf_norm_stats` | Target-character statistics source as a precomputed statistics file, which LoRA training writes into each checkpoint. Avoids re-encoding audio per request. |
+
+`perf_strength` is the knob that matters, and it is deliberately not defaulted: below its
+usable range (roughly `0.75`–`0.90`) the output's timbre flips onto the performance speaker,
+usually through an unstable in-between that sounds synthetic. Where that boundary sits depends
+on how far apart the two voices are, so a silent default would mislead. Expect a short sweep
+per pairing. It also interacts with the seed, which makes [Best-of-N](#best-of-n-candidates)
+useful here.
+
+`perf_normalize` exists to push that boundary lower by stripping the source's own timbre. It
+needs the target character's statistics, resolved in order from `perf_norm_*`, then the
+request's LoRA adapter (training writes them into every checkpoint), then the reference audio.
+A Speaker-Inversion-only voice has no audio to measure, so it must supply `perf_norm_wav`.
+That one case — normalization requested with an SI-only voice and no statistics anywhere — is
+rejected as a `400` here rather than surfacing as a synthesis failure, because the library
+cannot diagnose it.
+
+Barely matters with a LoRA voice, which anchors timbre on its own; an SI-only voice depends
+on it. For the underlying knobs see the inference fork's
+[parameter guide](https://github.com/stak/Irodori-TTS/blob/main/docs/parameters.md#performance-transfer).
+
 ## `duration_ignore_speaker`
 
 `irodori.duration_ignore_speaker` predicts length from the unconditional speaker token, so
@@ -347,9 +402,12 @@ Controls it exposes:
 - chunking: `chunking_enabled`, `chunk_min_chars`, `chunk_pause_seconds`, and a mode that
   splits the textarea on blank lines into explicit `irodori.chunks`
 
-It does **not** expose the two newest fork features: there is no Best-of-N (`n` /
-`num_candidates`) control and no `duration_ignore_speaker` control, so those have to be
-exercised with `curl` or an SDK.
+It does **not** expose the three newest fork features: there is no Best-of-N (`n` /
+`num_candidates`) control, no `duration_ignore_speaker` control, and no performance-transfer
+control, so those have to be exercised with `curl` or an SDK. The performance-transfer gap is
+the notable one, because `perf_audio_b64` exists specifically for browser recordings — a page
+that records with `MediaRecorder` and posts the clip inline is the intended client, and this
+one does not do it yet.
 
 Open the file directly in a browser. Because it then calls the API from a `file://`
 origin, allow it in the server configuration:
@@ -518,6 +576,10 @@ Fork-added `irodori` options:
 | `si_blend_mode` | `lerp` | `lerp` or `concat`. |
 | `chunks` | none | Explicit chunk list. See [Explicit chunks](#explicit-chunks). |
 | `chunk_pause_seconds` | `0` | Silence inserted at each chunk join (non-SSE only). |
+| `perf_wav` / `perf_latent` / `perf_audio_b64` | none | Performance-transfer source (host file, latent, or inline base64). Mutually exclusive. See [Performance transfer](#performance-transfer). |
+| `perf_strength` | none (**required** with any source) | SDEdit `tau` in `(0, 1]`. |
+| `perf_normalize` | `none` | `none`, `center` or `adain`. |
+| `perf_norm_wav` / `perf_norm_latent` / `perf_norm_stats` | none | Target-character statistics for `perf_normalize`. |
 
 The following `irodori` options exist upstream as well but are not listed in the README.
 They are accepted and forwarded to the runtime. Defaults come from settings where a

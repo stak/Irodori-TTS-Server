@@ -4,7 +4,7 @@ OpenAI Text-to-Speech API compatible server for [Irodori-TTS](https://github.com
 
 This server targets the [Irodori-TTS 500M v3 base model](https://huggingface.co/Aratako/Irodori-TTS-500M-v3). It supports reference-audio voice cloning, OpenAI-style response formats, and automatic long text chunking.
 
-This repository is a fork of [Aratako/Irodori-TTS-Server](https://github.com/Aratako/Irodori-TTS-Server). It runs inference on the [stak/Irodori-TTS](https://github.com/stak/Irodori-TTS) fork instead of upstream Irodori-TTS and adds server features of its own: Best-of-N candidates, Speaker Inversion blending, static client hosting with optional Basic auth, LoRA hot-swap, a watermark toggle, MP3 quality settings, performance profiles, and extra request fields. To keep this README close to upstream, all of that lives in [docs/fork.md](docs/fork.md), which also documents the request fields and environment variables this README does not list.
+This repository is a fork of [Aratako/Irodori-TTS-Server](https://github.com/Aratako/Irodori-TTS-Server). It runs inference on the [stak/Irodori-TTS](https://github.com/stak/Irodori-TTS) fork instead of upstream Irodori-TTS and adds server features of its own: Best-of-N candidates, Speaker Inversion blending, performance transfer (directing a generation with a recording), static client hosting with optional Basic auth, LoRA hot-swap, a watermark toggle, MP3 quality settings, performance profiles, and extra request fields. To keep this README close to upstream, all of that lives in [docs/fork.md](docs/fork.md), which also documents the request fields and environment variables this README does not list.
 
 Streaming synthesis is not implemented. Requests return one complete audio response.
 
@@ -16,7 +16,7 @@ Streaming synthesis is not implemented. Requests return one complete audio respo
 - Automatic long text chunking
 - Per-request dynamic LoRA adapter loading
 - Optional bearer token auth
-- Fork-only features (Best-of-N, Speaker Inversion blending, LoRA hot-swap, watermark toggle, static client hosting): see [docs/fork.md](docs/fork.md)
+- Fork-only features (Best-of-N, Speaker Inversion blending, performance transfer, LoRA hot-swap, watermark toggle, static client hosting): see [docs/fork.md](docs/fork.md)
 
 ## Requirements
 

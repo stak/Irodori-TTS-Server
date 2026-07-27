@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import threading
 
 import pytest
+import soundfile
 import torch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -2026,3 +2028,176 @@ def test_health_reports_static_basic_auth(tmp_path, monkeypatch):
     assert static["basic_auth"] is True
     # The credentials must never be exposed by an unauthenticated endpoint.
     assert "s3cret" not in json.dumps(static)
+
+
+def _wav_base64(sample_rate: int = 24000, seconds: float = 0.5) -> str:
+    buffer = io.BytesIO()
+    samples = torch.sin(torch.linspace(0.0, 60.0, int(sample_rate * seconds))).numpy()
+    soundfile.write(buffer, samples, sample_rate, format="WAV")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def test_performance_transfer_defaults_to_disabled():
+    payload = main.SpeechRequest(model="irodori-tts", input="こんにちは。", voice="none")
+    voice = main.VoiceSpec(voice_id="none", no_ref=True)
+
+    request = main._build_sampling_request(payload, voice)
+
+    assert request.perf_wav is None
+    assert request.perf_audio is None
+    assert request.perf_strength is None
+    assert request.perf_normalize == "none"
+
+
+def test_performance_transfer_options_reach_the_sampling_request():
+    payload = main.SpeechRequest(
+        model="irodori-tts",
+        input="こんにちは。",
+        voice="none",
+        irodori={
+            "perf_wav": "/srv/clips/take1.wav",
+            "perf_strength": 0.8,
+            "perf_normalize": "adain",
+            "perf_norm_wav": "/srv/voices/char.wav",
+        },
+    )
+    voice = main.VoiceSpec(voice_id="none", no_ref=True)
+
+    request = main._build_sampling_request(payload, voice)
+
+    assert request.perf_wav == "/srv/clips/take1.wav"
+    assert request.perf_strength == 0.8
+    assert request.perf_normalize == "adain"
+    assert request.perf_norm_wav == "/srv/voices/char.wav"
+
+
+def test_inline_performance_clip_is_decoded_to_a_waveform():
+    payload = main.SpeechRequest(
+        model="irodori-tts",
+        input="こんにちは。",
+        voice="none",
+        irodori={"perf_audio_b64": _wav_base64(), "perf_strength": 0.8},
+    )
+    voice = main.VoiceSpec(voice_id="none", no_ref=True)
+
+    request = main._build_sampling_request(payload, voice)
+
+    assert request.perf_audio is not None
+    assert request.perf_audio.ndim == 1
+    assert request.perf_audio_sample_rate == 24000
+    assert request.perf_wav is None
+
+
+def test_inline_performance_clip_rejects_invalid_base64():
+    payload = main.SpeechRequest(
+        model="irodori-tts",
+        input="こんにちは。",
+        voice="none",
+        irodori={"perf_audio_b64": "not base64!!", "perf_strength": 0.8},
+    )
+    voice = main.VoiceSpec(voice_id="none", no_ref=True)
+
+    with pytest.raises(ValueError, match="valid base64"):
+        main._build_sampling_request(payload, voice)
+
+
+def test_inline_performance_clip_cannot_be_combined_with_a_host_path():
+    payload = main.SpeechRequest(
+        model="irodori-tts",
+        input="こんにちは。",
+        voice="none",
+        irodori={
+            "perf_audio_b64": _wav_base64(),
+            "perf_wav": "/srv/clips/take1.wav",
+            "perf_strength": 0.8,
+        },
+    )
+    voice = main.VoiceSpec(voice_id="none", no_ref=True)
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        main._build_sampling_request(payload, voice)
+
+
+@pytest.mark.parametrize("strength", [0.0, 1.5, -0.2])
+def test_speech_rejects_out_of_range_perf_strength(monkeypatch, strength):
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(FakeRuntime()))
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "irodori": {"perf_wav": "/srv/clips/take1.wav", "perf_strength": strength},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "perf_strength" in response.json()["error"]["message"]
+
+
+def test_speech_requires_perf_strength_with_a_performance_source(monkeypatch):
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(FakeRuntime()))
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "irodori": {"perf_wav": "/srv/clips/take1.wav"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "perf_strength" in response.json()["error"]["message"]
+
+
+def test_speech_rejects_normalization_without_target_statistics(monkeypatch):
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(FakeRuntime()))
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "irodori": {
+                "perf_wav": "/srv/clips/take1.wav",
+                "perf_strength": 0.8,
+                "perf_normalize": "adain",
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "statistics" in response.json()["error"]["message"]
+
+
+def test_speech_accepts_normalization_when_a_lora_supplies_statistics(monkeypatch):
+    runtime = FakeRuntime()
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime))
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "irodori-tts",
+            "input": "こんにちは。",
+            "voice": "none",
+            "response_format": "wav",
+            "irodori": {
+                "perf_wav": "/srv/clips/take1.wav",
+                "perf_strength": 0.8,
+                "perf_normalize": "adain",
+                "lora_adapter": "/srv/loras/char",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert runtime.requests[0].perf_normalize == "adain"
+    assert runtime.requests[0].perf_strength == 0.8
