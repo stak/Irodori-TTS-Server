@@ -4,7 +4,7 @@ OpenAI Text-to-Speech API compatible server for [Irodori-TTS](https://github.com
 
 This server targets the [Irodori-TTS 500M v3 base model](https://huggingface.co/Aratako/Irodori-TTS-500M-v3). It supports reference-audio voice cloning, OpenAI-style response formats, and automatic long text chunking.
 
-Inference runs on the [stak/Irodori-TTS performance fork](https://github.com/stak/Irodori-TTS), which adds CUDA-graph replay, LoRA hot-swap, an optional watermark toggle, and other inference-speed optimizations on top of upstream Irodori-TTS. See the fork's [performance notes](https://github.com/stak/Irodori-TTS/blob/main/docs/performance.md) for details and tuning.
+This repository is a fork of [Aratako/Irodori-TTS-Server](https://github.com/Aratako/Irodori-TTS-Server). It runs inference on the [stak/Irodori-TTS](https://github.com/stak/Irodori-TTS) fork instead of upstream Irodori-TTS and adds server features of its own: Best-of-N candidates, Speaker Inversion blending, performance transfer (directing a generation with a recording), static client hosting with optional Basic auth, LoRA hot-swap, a watermark toggle, MP3 quality settings, performance profiles, and extra request fields. To keep this README close to upstream, all of that lives in [docs/fork.md](docs/fork.md), which also documents the request fields and environment variables this README does not list.
 
 Streaming synthesis is not implemented. Requests return one complete audio response.
 
@@ -15,9 +15,8 @@ Streaming synthesis is not implemented. Requests return one complete audio respo
 - Response formats: `wav`, `mp3`, `flac`, `opus`, `aac`, `pcm`
 - Automatic long text chunking
 - Per-request dynamic LoRA adapter loading
-- LoRA hot-swap that keeps cached CUDA graphs across adapter switches
-- Optional SilentCipher watermark disable (per request or by default)
 - Optional bearer token auth
+- Fork-only features (Best-of-N, Speaker Inversion blending, performance transfer, LoRA hot-swap, watermark toggle, static client hosting): see [docs/fork.md](docs/fork.md)
 
 ## Requirements
 
@@ -38,7 +37,7 @@ A CUDA or ROCm GPU is recommended for practical inference.
 ## Installation
 
 ```bash
-git clone https://github.com/Aratako/Irodori-TTS-Server.git
+git clone https://github.com/stak/Irodori-TTS-Server.git
 cd Irodori-TTS-Server
 uv sync --extra cu128
 cp .env.example .env
@@ -180,62 +179,13 @@ The SDK method name contains `streaming_response`, but this server still generat
 
 ## Test Client
 
-[examples/test-client.html](examples/test-client.html) is a self-contained browser page for exercising the API by hand: health check, voice list, synthesis with the common `irodori` options (num_steps, schedule, seed, LoRA adapter, hot-swap, watermark), and SSE streaming with a per-chunk arrival log. Generated audio plays inline and can be downloaded.
-
-Open the file directly in a browser. Because it calls the API from a `file://` origin, allow it in the server configuration:
-
-```env
-IRODORI_CORS_ORIGINS=["*"]
-```
-
-Then point the "サーバー URL" field at your server (default `http://127.0.0.1:8088`) and press ヘルスチェック.
-
-### Serving a client from this server
-
-A `file://` page has a null origin, so every request carrying `Authorization` or
-`Content-Type: application/json` must be preflighted. Proxies and endpoint security
-products sometimes drop those `OPTIONS` requests without replying, which looks like a
-working health check (a header-less `GET` is a simple request and needs no preflight)
-followed by synthesis that hangs or fails. Correct CORS configuration cannot help: the
-preflight never reaches the server.
-
-Serving the page from this server instead makes its API calls same-origin, which are
-never preflighted at all. Point `IRODORI_STATIC_FILE` at any HTML file and choose the
-route to serve it at:
-
-```env
-IRODORI_STATIC_FILE=/path/to/your-client.html
-IRODORI_STATIC_ROUTE=/client
-```
-
-The feature is off unless `IRODORI_STATIC_FILE` is set. `IRODORI_STATIC_ROUTE` defaults
-to `/` and must not collide with a built-in route; startup fails if it does. The file is
-read per request, so editing it does not need a restart. A client served this way needs
-no `IRODORI_CORS_ORIGINS` entry, and `GET /health` reports the active setting under
-`static`.
-
-To restrict who can load the page, guard the route with HTTP Basic auth:
-
-```env
-IRODORI_STATIC_AUTH_USER=operator
-IRODORI_STATIC_AUTH_PASSWORD=choose-something-long
-```
-
-Both must be set together; setting only one fails at startup rather than leaving the
-route unprotected. This guards the hosted file only — the API still uses
-`IRODORI_API_KEY`, so requests from the page keep sending their bearer token and are
-unaffected. Guarding the page matters because a browser client normally carries the API
-key in its own source, so anyone who can load the file can also call the API.
-
-Basic auth sends credentials base64-encoded, not encrypted. Over plain HTTP they are
-readable by anyone on the path, so treat this as access control against casual reach,
-not as transport security; put the server behind TLS if that matters.
+[examples/test-client.html](examples/test-client.html) is a self-contained browser page for exercising the API by hand. It is a fork addition: see [docs/fork.md](docs/fork.md#browser-test-client) for the controls it offers, the CORS setting it needs, and how to serve it from this server instead of opening it from `file://`.
 
 ## API
 
 ### `GET /health`
 
-Returns server status and current configuration. This endpoint does not load the model.
+Returns server status and current configuration. This endpoint does not load the model, and it is not covered by `IRODORI_API_KEY` auth — see [docs/fork.md](docs/fork.md#appendix-c-behavior-worth-knowing) for what it discloses.
 
 ### `GET /v1/models`
 
@@ -259,18 +209,18 @@ Example response:
 
 ### `POST /v1/audio/speech`
 
-Synthesizes speech and returns audio bytes.
+Synthesizes speech and returns audio bytes, plus seed and timing metadata in `X-Irodori-*` response headers ([docs/fork.md](docs/fork.md#response-headers)).
 
 Request fields:
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `model` | string | yes | Use `irodori-tts` unless you changed `IRODORI_MODEL_NAME`. |
-| `input` | string | yes | Text to synthesize. |
+| `input` | string | yes | Text to synthesize, up to 4096 characters (longer input is rejected, not chunked). |
 | `voice` | string or object | no | Voice ID, or `{ "id": "voice_id" }`. Uses `IRODORI_DEFAULT_VOICE` if omitted. |
 | `response_format` | string | no | `wav`, `mp3`, `flac`, `opus`, `aac`, or `pcm`. |
 | `speed` | number | no | Speaking speed, from `0.25` to `4.0`. Higher is faster; internally this is converted to an inverse duration scale. |
-| `n` | integer | no | Number of candidates to generate in one batched sampling pass, from `1` to `IRODORI_MAX_NUM_CANDIDATES`. With `n: 1` (default) the response is unchanged audio bytes; with `n > 1` it is a JSON candidate list. See [Best-of-N candidates](#best-of-n-candidates-n--1). |
+| `n` | integer | no | Fork addition. With `n: 1` (default) the response is unchanged audio bytes; with `n > 1` it is a JSON candidate list. See [docs/fork.md](docs/fork.md#best-of-n-candidates). |
 | `stream_format` | string | no | Set to `sse` to receive chunk-level Server-Sent Events. |
 | `irodori` | object | no | Irodori-specific inference options. |
 
@@ -301,10 +251,10 @@ curl -N http://localhost:8088/v1/audio/speech \
 
 ```text
 event: audio_chunk
-data: {"index":0,"text":"最初の文です。","format":"wav","media_type":"audio/wav","audio_base64":"...","seed":123,"total_to_decode":0.1}
+data: {"index":0,"text":"最初の文です。","format":"wav","media_type":"audio/wav","audio_base64":"...","seed":123,"total_to_decode":0.1,"encode_seconds":0.01}
 
 event: audio_chunk
-data: {"index":1,"text":"次の文です。","format":"wav","media_type":"audio/wav","audio_base64":"...","seed":123,"total_to_decode":0.1}
+data: {"index":1,"text":"次の文です。","format":"wav","media_type":"audio/wav","audio_base64":"...","seed":123,"total_to_decode":0.1,"encode_seconds":0.01}
 
 event: done
 data: {"chunks":2}
@@ -312,92 +262,6 @@ data: {"chunks":2}
 
 Each `audio_base64` value contains a complete audio file for that chunk, so
 clients can decode and enqueue chunks while later chunks are still generating.
-
-#### Best-of-N candidates (`n > 1`)
-
-Set `n` to generate several takes of the same input in one batched sampling
-pass and receive all of them, e.g. to pick the best take downstream with a
-speaker-similarity or quality scorer. Text encoding and reference-voice
-conditioning are computed once and shared across the batch, so this is cheaper
-than sending `n` separate requests. Candidate ranking is out of scope for the
-server; it returns every candidate and leaves selection to the client.
-
-```bash
-curl http://localhost:8088/v1/audio/speech \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "irodori-tts",
-    "input": "こんにちは、今日はいい天気ですね。",
-    "voice": "sample",
-    "response_format": "wav",
-    "n": 3
-  }'
-```
-
-With `n > 1` the response is JSON instead of raw audio bytes:
-
-```json
-{
-  "object": "speech.candidates",
-  "seed": 1234,
-  "sample_rate": 44100,
-  "candidates": [
-    {"index": 0, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1234, "duration_sec": 3.2},
-    {"index": 1, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1235, "duration_sec": 3.4},
-    {"index": 2, "audio": "<base64>", "format": "wav", "media_type": "audio/wav", "seed": 1236, "duration_sec": 3.1}
-  ]
-}
-```
-
-Seed semantics: candidate `i` draws its initial noise from its own generator
-seeded with `base seed + i`. The response's top-level `seed` is the base seed
-and each candidate carries its own derived `seed`. Two ways to bring a chosen
-candidate back:
-
-- **Standalone regeneration** — re-send the request with `n: 1` and
-  `irodori.seed` set to the candidate's `seed`. This draws bit-identical
-  initial noise, i.e. the same take. It is NOT bit-exact against the batched
-  output on CUDA: kernel numerics differ between batch sizes and the
-  diffusion steps amplify them chaotically. Measured on an RTX 4090 (bf16):
-  duration always identical, waveform correlation 0.88–0.99 depending on the
-  draw — treat it as "the same take, re-rendered", not as a copy. When the
-  archived bytes must match, use the bit-exact path below.
-- **Bit-exact reproduction** — re-send the identical request (same
-  `irodori.seed`, same `n`) and take the same `index`. Warm responses
-  reproduce bit-exactly; only the very first request at a new batch shape
-  (CUDA graph capture) can deviate negligibly (measured max abs sample
-  difference 1.6e-3, correlation 1.000000).
-
-Per-candidate seeds require an `irodori-tts` build with the
-per-candidate-seeds patch (candidate noise drawn per row from `seed + i`);
-with older builds all candidates share the base seed and only the bit-exact
-path applies.
-
-Restrictions with `n > 1`:
-
-- Automatic text chunking is skipped; the whole `input` is synthesized in a
-  single pass (so it is subject to `max_seconds`). Intended for short lines.
-- Explicit `irodori.chunks` and `stream_format: "sse"` are rejected with `400`.
-- `n` is capped by `IRODORI_MAX_NUM_CANDIDATES` (default `8`). All candidates
-  are sampled in one batch, so peak VRAM and per-step compute grow with `n`;
-  see the measured numbers below before raising the cap.
-
-`irodori.num_candidates` is accepted as an alias (it maps to the same runtime
-field); `n` takes precedence when both are set.
-
-Measured on an RTX 4090 (bf16 model, fp32 codec, CUDA graphs enabled, 40
-steps, ~6.5 s of 48 kHz output per candidate, warm graphs):
-
-| `n` | Latency (warm) | `n` separate warm requests | Process VRAM |
-| --- | --- | --- | --- |
-| 1 | 0.53 s | – | 8.7 GiB |
-| 2 | 0.77 s | 1.06 s | 8.7 GiB |
-| 4 | 1.21 s | 2.12 s | 8.8 GiB |
-| 8 | 2.32 s | 4.24 s | 8.8 GiB |
-
-As with any other change in tensor shapes, the first request at a new batch
-size captures CUDA graphs once (~3–4 s extra); later requests with the same
-`n` replay them.
 
 Irodori-specific options:
 
@@ -431,29 +295,16 @@ Common `irodori` options:
 | `lora_adapter` | PEFT LoRA adapter directory to load dynamically for this request. The adapter is not merged into the base checkpoint. |
 | `t_schedule_mode` | Sampling schedule, usually `linear` or `sway`. |
 | `sway_coeff` | Sway schedule coefficient when using `t_schedule_mode: "sway"`. |
-| `duration_ignore_speaker` | Predict length from the unconditional speaker token, so the speaker condition (Speaker Inversion embedding or reference audio) drives timbre only, not duration. Useful when the duration predictor was trained speaker-unconditioned — e.g. a per-character LoRA baked without speaker conditioning so SI stays applicable: supplying any speaker condition then routes duration through a path the predictor never trained and shifts predicted length off the intended pacing, which this restores. Default from `IRODORI_DEFAULT_DURATION_IGNORE_SPEAKER`. |
-| `perf_wav` | Performance-transfer source: a recording on the host whose acting — length, pausing, rhythm, and to a degree intonation — is carried into the output while the voice above still decides the timbre. It must say the same line as `input`. Requires `perf_strength`. See [Performance Transfer](#performance-transfer). |
-| `perf_latent` | Performance source as a precomputed latent (`.pt`) instead of `perf_wav`. |
-| `perf_audio_b64` | Performance source sent inline as base64 audio, which is what a browser recording uses. WAV, FLAC and OGG decode directly; other containers need `ffmpeg` on the host. Cannot be combined with `perf_wav`/`perf_latent`. |
-| `perf_strength` | SDEdit noise strength `tau` in `(0, 1]`: how much to respect the recording. `1.0` ignores it, smaller values follow it more closely. Usable range is roughly `0.75`–`0.90`; below it the output's timbre flips onto the performance speaker. Required whenever a performance source is given. |
-| `perf_normalize` | `none` (default), `center` or `adain`. Rewrites the source's per-channel latent statistics to the target character's so its timbre pulls the output less. Barely matters with a LoRA voice, which anchors timbre on its own; a Speaker-Inversion-only voice depends on it. |
-| `perf_norm_wav` | Audio of **the target character** supplying the statistics `perf_normalize` normalizes toward — not the performance source. One utterance is enough. Optional when the request uses a LoRA adapter that ships statistics, or a reference-audio voice. |
-| `perf_norm_latent` | Target-character statistics source as a latent (`.pt`). |
-| `perf_norm_stats` | Target-character statistics source as a precomputed statistics file, as LoRA training writes into each checkpoint. Avoids re-encoding audio per request. |
-| `lora_hot_swap` | Swap LoRA adapter weights in place so cached CUDA graphs survive the switch. Default from `IRODORI_DEFAULT_LORA_HOT_SWAP`. Refused automatically for incompatible adapters (DoRA, or `modules_to_save` beyond `duration_predictor`). |
-| `apply_watermark` | Set `false` to skip the SilentCipher AI-generation watermark (~15 ms per request). Default from `IRODORI_DEFAULT_APPLY_WATERMARK`. |
-| `chunks` | Explicit list of chunk texts (hard split boundaries). Takes precedence over `input`, which is still required but used only for logging. Combine with `chunking_enabled: false` to prevent any further automatic splitting inside each chunk. Cannot be combined with `seconds`. |
 | `chunking_enabled` | Enable or disable automatic long text chunking for this request. |
 | `chunk_min_chars` | Minimum non-space characters before a chunk split point is used. |
 | `first_sentence_chunk_min_chars` | Optional minimum non-space characters used only for splitting the first sentence. |
-| `chunk_pause_seconds` | Silence inserted between chunks when the server concatenates them into one response (default `0`, current behavior). Not applied on the SSE path, where the client receives chunks individually. |
 | `caption` | Voice/style description for caption-enabled VoiceDesign checkpoints. Ignored by checkpoints without caption conditioning. |
-| `cfg_scale_caption` | Strength of caption guidance. |
+| `cfg_scale_caption` | Strength of caption guidance. Defaults to `IRODORI_DEFAULT_CFG_SCALE_TEXT` when omitted. |
 | `max_caption_len` | Optional maximum caption token length. |
 
-Dynamic LoRA loading is per runtime process. The first request for an adapter loads it into memory; later requests for the same adapter reuse the cached adapter. To run the base model after an adapter has been loaded, omit `lora_adapter` or set it to `null`, `"none"`, or `"base"`. Dynamic LoRA is not compatible with `IRODORI_COMPILE_MODEL=true`.
+More options are accepted than are listed here. The fork-only ones and the upstream ones this table omits are documented in [docs/fork.md](docs/fork.md#appendix-a-request-fields-the-readme-does-not-list); unknown keys are silently ignored rather than rejected.
 
-Switching `lora_adapter` normally drops all cached CUDA graphs (they are recaptured on the next requests). Set `lora_hot_swap: true` (or `IRODORI_DEFAULT_LORA_HOT_SWAP=true`) to swap adapter weights in place and keep the graphs; a tiny floating-point drift can accumulate per swap.
+Dynamic LoRA loading is per runtime process. The first request for an adapter loads it into memory; later requests for the same adapter reuse the cached adapter. To run the base model after an adapter has been loaded, omit `lora_adapter` or set it to `null`, `"none"`, or `"base"`. Dynamic LoRA is not compatible with `IRODORI_COMPILE_MODEL=true`.
 
 ### Voice Management
 
@@ -497,34 +348,7 @@ You can also create `voices/voices.json`:
 
 Text-only inference is available with `voice: "none"` when `IRODORI_ALLOW_NO_REF_VOICE=true`.
 
-#### Speaker Inversion Blending
-
-Two or more Speaker Inversion voices can be blended at request time with
-`irodori.ref_embeds`, so mix ratios can be auditioned freely without baking
-intermediate files:
-
-```json
-{
-  "model": "irodori-tts",
-  "input": "こんにちは",
-  "irodori": {
-    "ref_embeds": [
-      {"voice": "alice", "weight": 0.7},
-      {"voice": "bob", "weight": 0.3}
-    ]
-  }
-}
-```
-
-Components reference registered voice IDs that resolve to `.speaker.safetensors`
-files (raw paths are not accepted); weights are normalized to sum to 1, and
-`weight: 0` components are ignored. `ref_embeds` cannot be combined with
-`ref_wav`/`ref_latent`/`ref_embed`/`no_ref`. The optional `irodori.si_blend_mode`
-selects the blend algorithm: `lerp` (default, weighted mean; requires equal token
-counts and preserves conditioning shapes, so cached CUDA graphs are reused across
-ratio changes) or `concat` (experimental token concatenation). The blend is
-deterministic: given the same weights it is bit-identical to pre-baking the file
-with Irodori-TTS's `blend_speaker_embeddings.py` and passing it as a voice.
+Several Speaker Inversion voices can also be blended at request time; see [docs/fork.md](docs/fork.md#speaker-inversion-blending).
 
 Voice file endpoints:
 
@@ -544,46 +368,6 @@ curl http://localhost:8088/v1/audio/voices \
   -F file=@sample.wav
 ```
 
-## Performance Transfer
-
-Lets a recording direct the *acting* of a generation while the voice still comes from the
-requested voice, so a user can record how they want a line delivered and have a character
-perform it. The recording must say the same line as `input`; its content otherwise fights the
-text condition and the output garbles. Output length comes from the recording.
-
-```bash
-curl -sS http://127.0.0.1:8088/v1/audio/speech \
-  -H 'Content-Type: application/json' \
-  -o out.wav \
-  -d '{
-    "model": "irodori-tts",
-    "input": "じゃあ見せてやるよ、魔術師の本気ってやつを",
-    "voice": "my-character",
-    "response_format": "wav",
-    "irodori": {
-      "perf_wav": "/srv/clips/my_take.wav",
-      "perf_strength": 0.8,
-      "perf_normalize": "adain"
-    }
-  }'
-```
-
-Browser clients send the clip inline instead, as base64 in `perf_audio_b64`.
-
-`perf_strength` is the one knob that matters. It does not degrade gracefully: below its usable
-range the output's timbre flips onto the performance speaker, usually through an unstable
-in-between that sounds synthetic, and where that happens depends on how far apart the two
-voices are. Expect a short sweep per pairing, and note that it interacts with the seed, so
-`n` (Best-of-N) is useful here.
-
-`perf_normalize` exists to push that boundary lower by stripping the source's own timbre. It
-needs the target character's own statistics, resolved from `perf_norm_*`, else the request's
-LoRA adapter (training writes them into every checkpoint), else the reference audio. A
-Speaker-Inversion-only voice has no audio to measure, so it must supply `perf_norm_wav`.
-
-See the fork's [parameter guide](https://github.com/stak/Irodori-TTS/blob/main/docs/parameters.md#performance-transfer)
-for the underlying knobs.
-
 ## Long Text Chunking
 
 Long text chunking is enabled by default.
@@ -593,13 +377,11 @@ When enabled, the server splits text only when both conditions are met:
 - the current chunk has at least `chunk_min_chars` non-space characters
 - the current character is sentence-ending punctuation (`。．.!！?？`) or a line break
 
-Commas (`、，,`) are intentionally not split points: Irodori-TTS conditions its output on the whole text of a chunk, so splitting mid-sentence loses cross-chunk nuance.
-
 Set `irodori.first_sentence_chunk_min_chars` to use a smaller threshold only
 for the first sentence. Later sentences keep the normal `chunk_min_chars`
 threshold.
 
-Each chunk is synthesized sequentially, then concatenated into one audio response. Chunks are joined back-to-back by default; set `irodori.chunk_pause_seconds` to insert that much silence at each join (tail silence is already trimmed by `trim_tail`, so the inserted pause is well-defined).
+Each chunk is synthesized sequentially, then concatenated into one audio response.
 
 Per-request override:
 
@@ -619,26 +401,7 @@ Per-request override:
 
 If `irodori.seconds` is set, chunking is skipped because that fixed duration applies to the whole request.
 
-### Explicit chunks
-
-Irodori-TTS conditions its output on the whole text of a chunk, so where the split lands affects prosody and nuance. When the automatic splitter picks bad boundaries, pass the boundaries yourself with `irodori.chunks`:
-
-```json
-{
-  "model": "irodori-tts",
-  "input": "一文目。二文目はとても長い…。三文目。",
-  "voice": "none",
-  "irodori": {
-    "chunks": ["一文目。二文目はとても長い…。", "三文目。"],
-    "chunking_enabled": false
-  }
-}
-```
-
-- Each entry is a hard boundary: the server never merges entries, and text never crosses an entry boundary.
-- `input` remains required (OpenAI SDK compatibility) but is not synthesized when `chunks` is present — set it to the joined text or a placeholder.
-- With `chunking_enabled: true` (the default) each entry may still be split further by the automatic splitter; send `chunking_enabled: false` for exact control.
-- Cannot be combined with `irodori.seconds` (HTTP 400): a single fixed duration is ambiguous across chunks.
+The chunk boundaries can also be passed explicitly, and silence can be inserted at each join; see [docs/fork.md](docs/fork.md#chunking-differences-and-explicit-chunks), which also covers how this fork's split rule differs from upstream.
 
 ## Request Queue
 
@@ -652,20 +415,6 @@ IRODORI_SYNTHESIS_WAIT_TIMEOUT=300
 ```
 
 If the model is still loading or no synthesis slot becomes available before the configured timeout, the server returns HTTP 503.
-
-## Performance
-
-Inference runs on the [stak/Irodori-TTS performance fork](https://github.com/stak/Irodori-TTS). The fork's optimizations (TF32 matmul, CUDA graph replay, fp16 codec decode, text-length bucketing, request-time LoRA merge) are grouped behind the library's `IRODORI_PERF_PROFILE`: the library default is `upstream` (bit-identical to unmodified Irodori-TTS), while **the server exports `recommended` by default** (`IRODORI_RUNTIME_PROFILE`) because serving fast is its purpose. Set `IRODORI_RUNTIME_PROFILE=upstream` — or set `IRODORI_PERF_PROFILE` yourself, which always wins — to serve upstream-identical outputs. Individual `IRODORI_DISABLE_*` variables still override either profile. Full details, measurements, and the recommended configurations table are in the fork's [docs/performance.md](https://github.com/stak/Irodori-TTS/blob/main/docs/performance.md).
-
-Recommended server setup on an NVIDIA GPU:
-
-1. Set `IRODORI_MODEL_PRECISION=bf16` and keep `IRODORI_CODEC_PRECISION=fp32` (the codec decoder already runs its fp16 fast path; bf16/fp16 codec precision only lowers quality). `compose.gpu.yaml` applies this pairing by default.
-2. If requests use a LoRA adapter, consider `IRODORI_DEFAULT_LORA_HOT_SWAP=true` so adapter switches keep the cached graphs.
-3. On Linux/WSL2 (including the Docker image), `IRODORI_COMPILE=1` additionally runs the model through `torch.compile` inside the CUDA graphs for a further speedup. Run the fork's `precompile.py` once beforehand with the production shape grid so no real request pays an on-demand compile; later restarts reuse the on-disk compile caches. In Docker those caches are persisted in the `inductor_cache` / `triton_cache` volumes, so only the first container run pays the cold-compile cost. Leave it off on Windows-native.
-
-CUDA graphs are captured lazily and keyed by tensor shapes and CFG scales: the first request at a new shape (length bucket, candidate count, CFG scales, reference conditioning) pays a one-time capture cost of about a second, and every following request with that shape replays the graph. `num_steps`, `seed`, `t_schedule_mode`, and `sway_coeff` can vary freely without recapture.
-
-The performance-fork environment variables (`IRODORI_DISABLE_TF32`, `IRODORI_TEXT_BUCKETS`, ...) are read by the `irodori-tts` library directly from the process environment. The server exports `.env` to the environment at startup, so they can be configured in the same `.env` file; they are also listed in `.env.example`, `compose.gpu.yaml`, and `compose.rocm.yaml` with their defaults.
 
 ## Configuration
 
@@ -690,7 +439,6 @@ All environment variables use the `IRODORI_` prefix. Request fields override the
 | `IRODORI_COMPILE_MODEL` | `false` | Enable `torch.compile` for core inference methods. Keep disabled when using dynamic LoRA adapters. |
 | `IRODORI_COMPILE_DYNAMIC` | `false` | Use `dynamic=True` for `torch.compile`. |
 | `IRODORI_PRELOAD` | `false` | Load the model during startup. |
-| `IRODORI_RUNTIME_PROFILE` | `recommended` | Exported to the irodori-tts library as `IRODORI_PERF_PROFILE` at startup (an already-set `IRODORI_PERF_PROFILE` wins). `upstream` serves bit-identical unmodified-Irodori-TTS outputs. |
 | `IRODORI_MODEL_LOAD_TIMEOUT` | `300` | Seconds to wait for model loading. |
 | `IRODORI_MAX_CONCURRENT_SYNTHESIS` | `1` | Maximum simultaneous synthesis jobs. |
 | `IRODORI_SYNTHESIS_WAIT_TIMEOUT` | `300` | Seconds to wait for a synthesis slot. |
@@ -698,42 +446,18 @@ All environment variables use the `IRODORI_` prefix. Request fields override the
 | `IRODORI_DEFAULT_VOICE` | unset | Used when request omits `voice`. |
 | `IRODORI_ALLOW_NO_REF_VOICE` | `true` | Allow `voice: "none"` text-only inference. |
 | `IRODORI_DEFAULT_RESPONSE_FORMAT` | `wav` | Default response format. |
-| `IRODORI_MP3_BITRATE_MODE` | `VARIABLE` | MP3 encoder bitrate mode: `VARIABLE` (LAME VBR), `AVERAGE`, or `CONSTANT`. |
-| `IRODORI_MP3_COMPRESSION_LEVEL` | `0.0` | MP3 encoder quality, `0.0` (best) to just under `1.0`. For `VARIABLE` this maps to the LAME `-V` quality (`0.0` = `-V0`, ~160 kbps mono speech); for `CONSTANT` it selects the bitrate (`0.0` = 320 kbps). Applies to the default soundfile encoder; the torchaudio/ffmpeg fallbacks use their own defaults. |
 | `IRODORI_DEFAULT_NUM_STEPS` | `40` | Default diffusion steps. |
 | `IRODORI_DEFAULT_T_SCHEDULE_MODE` | `linear` | Default timestep schedule. |
 | `IRODORI_DEFAULT_SWAY_COEFF` | `-1.0` | Default sway coefficient. Used only when `t_schedule_mode` is `sway`. |
 | `IRODORI_DEFAULT_DURATION_SCALE` | `1.0` | Default duration scale. |
-| `IRODORI_DEFAULT_DURATION_IGNORE_SPEAKER` | `false` | Default for predicting length from the unconditional speaker token (see `duration_ignore_speaker`). |
-| `IRODORI_DEFAULT_CFG_SCALE_TEXT` | `3.0` | Default text CFG scale. |
+| `IRODORI_DEFAULT_CFG_SCALE_TEXT` | `3.0` | Default text CFG scale. Also the default for `irodori.cfg_scale_caption`. |
 | `IRODORI_DEFAULT_CFG_SCALE_SPEAKER` | `5.0` | Default speaker CFG scale. |
 | `IRODORI_DEFAULT_CFG_GUIDANCE_MODE` | `independent` | Default CFG guidance mode. |
 | `IRODORI_DEFAULT_CHUNKING_ENABLED` | `true` | Enable punctuation-aware chunking by default. |
 | `IRODORI_DEFAULT_CHUNK_MIN_CHARS` | `80` | Minimum non-space characters before a split point is used. |
 | `IRODORI_DEFAULT_FIRST_SENTENCE_CHUNK_MIN_CHARS` | unset | Minimum non-space characters before the first sentence split point is used. Unset keeps normal `chunk_min_chars` behavior. |
-| `IRODORI_DEFAULT_NUM_CANDIDATES` | `1` | Default candidate count when the request omits `n` / `irodori.num_candidates`. |
-| `IRODORI_MAX_NUM_CANDIDATES` | `8` | Upper bound accepted for `n` / `irodori.num_candidates`. |
-| `IRODORI_DEFAULT_LORA_HOT_SWAP` | `false` | Swap LoRA adapter weights in place on adapter switches so cached CUDA graphs survive. |
-| `IRODORI_DEFAULT_APPLY_WATERMARK` | `true` | Embed the SilentCipher AI-generation watermark in generated audio. |
-| `IRODORI_CORS_ORIGINS` | unset | JSON list of allowed CORS origins, e.g. `["*"]`. CORS middleware is only installed when this is non-empty. |
-| `IRODORI_STATIC_FILE` | unset | Path to a single file (typically an HTML client) to serve. Static hosting is off while unset. See [Serving a client from this server](#serving-a-client-from-this-server). |
-| `IRODORI_STATIC_ROUTE` | `/` | Route that `IRODORI_STATIC_FILE` is served at. Must start with `/` and must not collide with a built-in route. |
-| `IRODORI_STATIC_AUTH_USER` | unset | HTTP Basic auth username for the static route. Must be set together with `IRODORI_STATIC_AUTH_PASSWORD`. Guards the hosted file only, not the API. |
-| `IRODORI_STATIC_AUTH_PASSWORD` | unset | HTTP Basic auth password for the static route. |
 
-The following variables are read by the [Irodori-TTS performance fork](https://github.com/stak/Irodori-TTS/blob/main/docs/performance.md) directly from the process environment (defaults shown; all optimizations are inference-only):
-
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `IRODORI_DISABLE_TF32` | `0` | `1` disables TF32 matmul (exact fp32, slower). |
-| `IRODORI_DISABLE_LORA_MERGE` | `0` | `1` keeps LoRA adapters unmerged (upstream behavior). |
-| `IRODORI_DISABLE_CUDA_GRAPH` | `0` | `1` disables CUDA graph capture/replay entirely. |
-| `IRODORI_DISABLE_DURATION_GRAPH` | `0` | `1` keeps condition encoding + duration prediction eager (sampler graphs unaffected). |
-| `IRODORI_DISABLE_FP16_DECODE` | `0` | `1` keeps the codec decoder in fp32 (exact decode, ~2x slower). |
-| `IRODORI_TEXT_BUCKETS` | `64` | Comma-separated text-length buckets (tokens); short texts are padded to the smallest fitting bucket. `0` or empty disables. |
-| `IRODORI_COMPILE` | `0` | `1` runs the model through `torch.compile` inside the CUDA step graphs. Requires a Triton toolchain (Linux/WSL2 + C compiler). |
-| `IRODORI_CUDA_GRAPH_BUCKET` | `16` | Latent-length bucket size in patched steps; `1` disables padding. |
-| `IRODORI_CUDA_GRAPH_CACHE` | `64` | Maximum cached CUDA graph entries. |
+More variables are supported than are listed here: this fork's own settings, the performance-fork variables it passes through, and the upstream settings this table omits are documented in [docs/fork.md](docs/fork.md#fork-environment-variables). The Compose files for GPU and ROCm also override some defaults ([docs/fork.md](docs/fork.md#docker-and-compose-differences)).
 
 ## Development
 
