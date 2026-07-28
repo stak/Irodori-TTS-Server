@@ -48,9 +48,9 @@ There is no `rev=` in `pyproject.toml`; the exact commit is pinned **only in `uv
   `uv run` may re-sync the environment, which also drops the PyTorch backend extra you
   selected.
 
-The inference fork adds CUDA-graph replay, `torch.compile` inside the graphs, fp16 codec
-decode, text-length bucketing, request-time LoRA merge, LoRA hot-swap, and an optional
-watermark toggle. Its own documentation lives in
+The inference fork adds CUDA-graph replay, `torch.compile` inside the graphs, fused
+same-input GEMMs in the DiT, fp16 codec decode, text-length bucketing, request-time LoRA
+merge, LoRA hot-swap, and an optional watermark toggle. Its own documentation lives in
 [stak/Irodori-TTS docs/performance.md](https://github.com/stak/Irodori-TTS/blob/main/docs/performance.md).
 
 ## Performance profile
@@ -78,6 +78,23 @@ Recommended setup on an NVIDIA GPU:
    an on-demand compile; later restarts reuse the on-disk compile caches. In Docker those
    caches live in the `inductor_cache` / `triton_cache` volumes, so only the first
    container run pays the cold-compile cost. Leave it off on Windows-native.
+4. With compile on, `IRODORI_COMPILE_AUTOTUNE=1` picks each GEMM kernel by benchmark
+   instead of trusting the cuBLAS heuristic, which measured a further few ms per request
+   on the reference serving setup. It changes the compile-cache identity, so
+   `precompile.py` must be run with the same value or the warmed cache will not be used
+   (and autotuning makes that cold run considerably slower).
+
+Utterance length interacts with both of the above. The inference fork measured its
+fused-GEMM and autotune regressions confined to a single latent bucket - utterances of
+about 23.1-23.7 s - rather than growing with length, so a workload only pays it if the
+lengths it produces land there. On this server the *chunker* decides those lengths: with
+the default `IRODORI_DEFAULT_CHUNK_MIN_CHARS=80`, long input becomes several chunks, and
+each chunk that lands in the bad bucket pays separately. Raising
+`IRODORI_DEFAULT_CHUNK_MIN_CHARS` so long input stays one utterance measured no
+regression. Note the trade: one utterance is bounded by
+`IRODORI_DEFAULT_MAX_SECONDS` (30 s), and predicted duration is *silently clamped* to it,
+so input needing more than that is cut short unless `max_seconds` is raised too. See
+[Chunking differences and explicit chunks](#chunking-differences-and-explicit-chunks).
 
 CUDA graphs are captured lazily and keyed by tensor shapes and CFG scales: the first
 request at a new shape (length bucket, candidate count, CFG scales, reference
@@ -510,6 +527,7 @@ the path *inside* the container.
 | `IRODORI_PRELOAD` | – | `true` | `false` | `false` |
 | `IRODORI_RUNTIME_PROFILE` | – | `recommended` | `recommended` | `recommended` |
 | `IRODORI_COMPILE` | – | `0` | `0` | `0` (library) |
+| `IRODORI_COMPILE_AUTOTUNE` | – | `0` | `0` | `0` (library) |
 | `IRODORI_CUDA_GRAPH_BUCKET` | – | `16` | `16` | `16` (library) |
 | `IRODORI_CUDA_GRAPH_CACHE` | – | `64` | `64` | `64` (library) |
 | `IRODORI_DISABLE_*`, `IRODORI_TEXT_BUCKETS` | – | passed through, empty | passed through, empty | profile decides |
@@ -558,7 +576,9 @@ all optimizations are inference-only):
 | `IRODORI_DISABLE_DURATION_GRAPH` | `0` | `1` keeps condition encoding + duration prediction eager (sampler graphs unaffected). |
 | `IRODORI_DISABLE_FP16_DECODE` | `0` | `1` keeps the codec decoder in fp32 (exact decode, ~2x slower). |
 | `IRODORI_TEXT_BUCKETS` | `64` | Comma-separated text-length buckets (tokens); short texts are padded to the smallest fitting bucket. `0` or empty disables. |
+| `IRODORI_DISABLE_FUSED_GEMM` | `0` | `1` keeps the DiT's wq/wk/wv/gate and w1/w3 projections as separate GEMMs. Needs the LoRA merge optimization for adapter requests; the library falls back to the unfused path on its own when the active adapter cannot be merged. |
 | `IRODORI_COMPILE` | `0` | `1` runs the model through `torch.compile` inside the CUDA step graphs. Requires a Triton toolchain (Linux/WSL2 + C compiler). |
+| `IRODORI_COMPILE_AUTOTUNE` | `0` | `1` benchmarks Triton GEMM candidates against cuBLAS per matmul shape while compiling. Only meaningful with `IRODORI_COMPILE=1`, and it changes the compile-cache identity - `precompile.py` must run with the same value. |
 | `IRODORI_CUDA_GRAPH_BUCKET` | `16` | Latent-length bucket size in patched steps; `1` disables padding. |
 | `IRODORI_CUDA_GRAPH_CACHE` | `64` | Maximum cached CUDA graph entries. |
 
