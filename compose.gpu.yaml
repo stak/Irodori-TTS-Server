@@ -25,10 +25,15 @@ services:
       IRODORI_DISABLE_CUDA_GRAPH: ${IRODORI_DISABLE_CUDA_GRAPH:-}
       IRODORI_DISABLE_DURATION_GRAPH: ${IRODORI_DISABLE_DURATION_GRAPH:-}
       IRODORI_DISABLE_FP16_DECODE: ${IRODORI_DISABLE_FP16_DECODE:-}
+      IRODORI_DISABLE_FUSED_GEMM: ${IRODORI_DISABLE_FUSED_GEMM:-}
       IRODORI_TEXT_BUCKETS: ${IRODORI_TEXT_BUCKETS:-}
       # 1 enables torch.compile inside the CUDA step graphs (Linux containers
       # have the required Triton toolchain; a cold compile takes minutes —
       # run the fork's precompile.py once to pre-populate the cache).
       IRODORI_COMPILE: ${IRODORI_COMPILE:-0}
+      # 1 picks GEMM kernels by benchmark instead of the cuBLAS heuristic.
+      # Changes the compile-cache identity, so precompile.py must run with
+      # the same value for the warmed cache to be used.
+      IRODORI_COMPILE_AUTOTUNE: ${IRODORI_COMPILE_AUTOTUNE:-0}
       IRODORI_CUDA_GRAPH_BUCKET: ${IRODORI_CUDA_GRAPH_BUCKET:-16}
       IRODORI_CUDA_GRAPH_CACHE: ${IRODORI_CUDA_GRAPH_CACHE:-64}
